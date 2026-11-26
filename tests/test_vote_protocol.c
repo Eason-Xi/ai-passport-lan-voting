@@ -30,6 +30,17 @@ int main(int argc, char **argv)
     }
     snprintf(packet, sizeof(packet), timed, "0");
     assert(vote_parse_snapshot(packet, &snapshot) && remaining == 0);
+    const char *group = "{\"v\":1,\"type\":\"state\",\"poll\":{\"id\":\"0123456789abcdef\",\"phase\":\"open\",\"title\":\"甲\",\"options\":[\"甲\",\"乙\"],\"my_choice\":-1,\"batch\":%s}}";
+    snprintf(packet, sizeof(packet), group, "{\"count\":50,\"index\":49,\"answered\":48}");
+    assert(vote_parse_snapshot(packet, &snapshot) && snapshot.batch_index == 49 &&
+           snapshot.batch_count == 50 && snapshot.answered == 48 && !snapshot.next_id[0]);
+    const char *bad_groups[] = {"null", "[]", "{\"count\":51,\"index\":1,\"answered\":0}",
+        "{\"count\":2,\"index\":0,\"answered\":0}", "{\"count\":2,\"index\":3,\"answered\":0}",
+        "{\"count\":2,\"index\":1,\"answered\":3}", "{\"count\":2,\"index\":1,\"answered\":0.5}"};
+    for (size_t i = 0; i < sizeof(bad_groups)/sizeof(bad_groups[0]); i++) {
+        snprintf(packet, sizeof(packet), group, bad_groups[i]);
+        assert(!vote_parse_snapshot(packet, &snapshot));
+    }
     vote_snapshot_t before = snapshot;
     const char *invalid[] = {
         "[]", "{}", "[[[[[[[[[0]]]]]]]]]", "{\"v\":2,\"type\":\"state\",\"poll\":null}",

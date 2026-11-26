@@ -266,6 +266,28 @@ input::placeholder {
   justify-content: space-between;
   margin: 25px 0 12px;
 }
+.draft-question {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.draft-question legend {
+  margin-bottom: 8px;
+  padding: 0;
+  color: var(--green);
+  font-weight: 650;
+}
+.draft-question + .draft-question {
+  margin-top: 24px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.remove-question { float: right; }
+.draft-question:only-child legend, .draft-question:only-child .remove-question { display: none; }
+#add-question { margin-top: 12px; }
+#batch-picker { display: grid; gap: 6px; margin-bottom: 16px; }
+#live-question { min-width: 0; text-overflow: ellipsis; }
 .option-heading label {
   margin: 0;
   display: block;

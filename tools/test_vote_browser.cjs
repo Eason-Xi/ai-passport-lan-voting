@@ -23,6 +23,64 @@ const base = "http://127.0.0.1:18765";
 const clients = [];
 const errors = [];
 let browser;
+async function checkBatch(page) {
+  await page.setViewportSize({width:1440,height:1100});
+  const form = page.locator("#poll-form"), cards = form.locator(".draft-question");
+  await form.getByLabel("截止方式").selectOption("60");
+  await cards.nth(0).getByLabel("投票题目").fill("集合地点");
+  await cards.nth(0).getByLabel("选项 A",{exact:true}).fill("学校");
+  await cards.nth(0).getByLabel("选项 B",{exact:true}).fill("广场");
+  const add = form.getByRole("button",{name:"添加题目"});
+  await add.click();
+  await cards.nth(1).getByLabel("投票题目").fill("先去哪里");
+  await cards.nth(1).getByLabel("选项 A",{exact:true}).fill("公园");
+  await cards.nth(1).getByLabel("选项 B",{exact:true}).fill("车站");
+  await add.click();
+  await cards.nth(2).getByRole("button",{name:"移除本题"}).click();
+  assert.equal(await cards.count(),2);
+  await add.click();
+  await cards.nth(2).getByLabel("投票题目").fill("是否骑车");
+  await cards.nth(2).getByLabel("选项 A",{exact:true}).fill("是");
+  await cards.nth(2).getByLabel("选项 B",{exact:true}).fill("是");
+  const start = form.getByRole("button",{name:"一次发起 3 题"});
+  await start.click();
+  await page.getByRole("status").getByText(/第 3 题有重复选项/).waitFor();
+  await cards.nth(2).getByLabel("选项 B",{exact:true}).fill("否");
+  await start.click();
+  await page.locator("#live-title").getByText("集合地点",{exact:true}).waitFor();
+  const state = await (await fetch(base+"/api/state")).json();
+  const polls = state.batch.polls;
+  assert.equal(polls.length,3);
+  assert(polls.every(p=>p.phase==="open" && p.deadline_at_ms===polls[0].deadline_at_ms));
+  clients[0].send(JSON.stringify({v:1,type:"vote",poll_id:polls[0].id,choice:0}));
+  await page.waitForFunction(()=>document.getElementById("votes").textContent==="1");
+  clients[0].send(JSON.stringify({v:1,type:"vote",poll_id:polls[1].id,choice:1}));
+  clients[1].send(JSON.stringify({v:1,type:"vote",poll_id:polls[0].id,choice:1}));
+  await page.waitForFunction(()=>document.getElementById("votes").textContent==="3");
+  await page.getByText(/已答 2 \/ 3 题/).waitFor();
+  await page.getByLabel("查看题目").selectOption(polls[1].id);
+  await page.locator("#live-title").getByText("先去哪里",{exact:true}).waitFor();
+  await page.locator("#result-caption").getByText(/本题已收 1 票/).waitFor();
+  await page.screenshot({path:path.join(output,"batch-live.png"),fullPage:true});
+  await page.locator("#edit-deadline summary").click();
+  await page.locator("#deadline-form").getByLabel("截止方式").selectOption("manual");
+  await page.locator("#save-deadline").click();
+  await page.locator("#time-left").getByText("手动截止",{exact:true}).waitFor();
+  assert((await (await fetch(base+"/api/state")).json()).batch.polls.every(p=>!("deadline_at_ms" in p)));
+  await page.getByRole("button",{name:"整组截止收票"}).click();
+  await page.waitForFunction(()=>document.getElementById("phase").textContent==="已截止");
+  await page.getByRole("button",{name:"公布整组结果"}).click();
+  await page.waitForFunction(()=>document.getElementById("phase").textContent==="结果已公布");
+  const shown = page.waitForResponse(r => r.url() === base+"/api/show_result" && r.request().method()==="POST");
+  await page.getByRole("button",{name:"在投票器上展示本题"}).click();
+  assert((await shown).ok());
+  assert.equal((await (await fetch(base+"/api/state")).json()).batch.shown_result,polls[1].id);
+  await page.reload();
+  await page.getByLabel("查看题目").selectOption(polls[2].id);
+  await page.locator("#result-caption").getByText(/本题已收 0 票/).waitFor();
+  await page.setViewportSize({width:390,height:844});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),"批量投票手机页面横向溢出");
+}
 async function checkTimedPoll(page) {
   const create = page.locator("#poll-form"), edit = page.locator("#deadline-form");
   const start = create.getByRole("button", {name:"发起投票"});
@@ -268,6 +326,7 @@ async function run() {
     state.poll.id,
   );
   await checkTimedPoll(page);
+  await checkBatch(page);
   await checkPhoneSetup();
   assert.deepEqual(errors, []);
   fs.writeFileSync(
@@ -289,6 +348,7 @@ async function run() {
           "未支持字形提示",
           "移动端无横向溢出",
           "定时发题、取消与更改截止时间、跨时区输入、刷新后自动截止与手动公布",
+          "批量增删题目、整批校验、按人进度、逐题计票、整组截止和结果展示",
           "固件配网页选网、自动模式、更正入场码、多会场选择和成功提示（无线接口使用测试数据）",
         ],
       },
@@ -297,7 +357,7 @@ async function run() {
     ),
   );
   console.log(
-    "浏览器完整流程通过：十端六选项、定时截止和跨时区输入、桌面及手机布局，控制台错误 0。",
+    "浏览器验收通过，覆盖十端计票、批量发题与结果展示、定时截止、跨时区输入及桌面和手机布局，控制台错误 0。",
   );
 }
 run()

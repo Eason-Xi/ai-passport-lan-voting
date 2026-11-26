@@ -17,6 +17,15 @@ static bool text_field(const cJSON *object, const char *key, char *dest, size_t 
     return true;
 }
 
+static bool poll_id_field(const cJSON *object, const char *key, char dest[17])
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (!cJSON_IsString(item) || strlen(item->valuestring) != 16 ||
+        strspn(item->valuestring, "0123456789abcdef") != 16) return false;
+    memcpy(dest, item->valuestring, 17);
+    return true;
+}
+
 cJSON *vote_parse_json_object(const char *json, size_t max_bytes)
 {
     if (!json || strlen(json) > max_bytes) return NULL;
@@ -55,15 +64,28 @@ bool vote_snapshot_from_json(const cJSON *root, vote_snapshot_t *snapshot, int64
     if (!integer(version, 1, 1) || !cJSON_IsString(type) || strcmp(type->valuestring, "state")) goto done;
     const cJSON *poll = cJSON_GetObjectItemCaseSensitive(root, "poll");
     if (cJSON_IsNull(poll)) { valid = true; goto done; }
-    if (!cJSON_IsObject(poll) || !text_field(poll, "id", next.id, sizeof(next.id), 16) ||
-        strlen(next.id) != 16 || strspn(next.id, "0123456789abcdef") != 16 ||
+    if (!cJSON_IsObject(poll) || !poll_id_field(poll, "id", next.id) ||
         !text_field(poll, "title", next.title, sizeof(next.title), 60)) goto done;
+    const cJSON *batch = cJSON_GetObjectItemCaseSensitive(poll, "batch");
+    if (batch) {
+        const cJSON *count = cJSON_GetObjectItemCaseSensitive(batch, "count");
+        const cJSON *index = cJSON_GetObjectItemCaseSensitive(batch, "index");
+        const cJSON *answered = cJSON_GetObjectItemCaseSensitive(batch, "answered");
+        if (!cJSON_IsObject(batch) || !integer(count, 2, VOTE_MAX_BATCH) ||
+            !integer(index, 1, count->valueint) || !integer(answered, 0, count->valueint)) goto done;
+        next.batch_count = count->valueint;
+        next.batch_index = index->valueint;
+        next.answered = answered->valueint;
+    }
     const cJSON *phase = cJSON_GetObjectItemCaseSensitive(poll, "phase");
     if (!cJSON_IsString(phase)) goto done;
     if (!strcmp(phase->valuestring, "open")) next.phase = VOTE_OPEN;
     else if (!strcmp(phase->valuestring, "closed")) next.phase = VOTE_CLOSED;
     else if (!strcmp(phase->valuestring, "published")) next.phase = VOTE_PUBLISHED;
     else goto done;
+    if (batch && next.phase == VOTE_PUBLISHED &&
+        (!poll_id_field(batch, "next", next.next_id) || !poll_id_field(batch, "prev", next.prev_id) ||
+         !strcmp(next.id, next.next_id) || !strcmp(next.id, next.prev_id))) goto done;
     const cJSON *left = cJSON_GetObjectItemCaseSensitive(poll, "remaining_ms");
     if (left) {
         // 毫秒值可能超过 32 位。先检查范围再转整型，兼容旧主持台省略此字段。

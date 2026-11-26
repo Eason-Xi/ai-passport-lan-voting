@@ -77,6 +77,11 @@ void app_main(void)
                 } else s_view.settings_prompt = !s_view.settings_prompt;
             } else if (s_view.setup && input.event == BSP_BTN_CLICK && input.key != BSP_BTN_OK) {
                 s_view.setup_page_qr = !s_view.setup_page_qr;
+            } else if (!s_view.setup && !s_view.settings_prompt && s_view.model.connected &&
+                       s_view.model.poll.batch_count > 1 && s_view.model.poll.phase == VOTE_PUBLISHED &&
+                       ((input.event == BSP_BTN_LONG && input.key != BSP_BTN_OK) ||
+                        (input.event == BSP_BTN_CLICK && input.key == BSP_BTN_OK))) {
+                vote_net_view_question(input.key == BSP_BTN_UP ? s_view.model.poll.prev_id : s_view.model.poll.next_id);
             } else if ((input.event == BSP_BTN_CLICK || input.event == BSP_BTN_DOUBLE) && !s_view.setup) {
                 if (s_view.settings_prompt) {
                     if (input.key == BSP_BTN_OK && network_ready) {

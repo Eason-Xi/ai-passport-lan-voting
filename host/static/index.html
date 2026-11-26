@@ -37,7 +37,7 @@
           ><strong><b id="online">0</b><small> / 10 台</small></strong>
         </div>
         <div>
-          <span>本题已收票</span
+          <span id="votes-label">本题已收票</span
           ><strong><b id="votes">0</b><small> 票</small></strong>
         </div>
         <div><span>当前阶段</span><strong id="phase">等待发起</strong></div>
@@ -49,26 +49,13 @@
             <span class="pill">单选 · 首票锁定</span>
           </div>
           <form id="poll-form">
-            <label for="question"
-              >投票题目<span id="question-count">0 / 60</span></label
-            ><textarea
-              id="question"
-              maxlength="60"
-              rows="2"
-              required
-              placeholder="例如：周末团建，你更想去哪里？"
-            ></textarea>
-            <div class="option-heading">
-              <label>投票选项 <small>2～6 项，每项最多 24 字</small></label
-              ><button type="button" class="text-button" id="add-option">
-                ＋ 添加选项
-              </button>
-            </div>
-            <div id="options"></div>
+            <div id="questions"></div>
+            <button type="button" class="secondary" id="add-question">＋ 添加题目</button>
             <p class="help">
               支持常用简体汉字、英文与标点。超出设备字库的文字会在发起前提示。
             </p>
             <div class="deadline-fields" id="new-deadline"></div>
+            <p class="help" id="batch-deadline-note" hidden></p>
             <p class="help" id="deadline-upgrade" hidden>当前主持服务仅支持手动截止。用原数据库重启新版服务即可定时收票。</p>
             <button class="primary" id="start" type="submit">
               发起投票 <span>↗</span>
@@ -89,6 +76,9 @@
             <p>填写题目和至少两个选项后即可发起。</p>
           </div>
           <div id="live-poll" hidden>
+            <label id="batch-picker" for="live-question" hidden>查看题目
+              <select id="live-question"></select>
+            </label>
             <h3 id="live-title"></h3>
             <p id="result-caption">票数仅主持人可见，公布后同步到投票器。</p>
             <div class="deadline-status">
@@ -102,6 +92,7 @@
               </details>
             </div>
             <div id="results"></div>
+            <button id="show-result" class="secondary" type="button" hidden>在投票器上展示本题</button>
             <div class="actions">
               <button id="close" class="secondary" type="button">
                 截止收票</button
@@ -130,6 +121,19 @@
         共选 · 局域网多人互动投票器<span>数据保存在这台电脑 · 无需互联网</span>
       </footer>
     </main>
+    <template id="question-template">
+      <fieldset class="draft-question">
+        <legend></legend>
+        <button type="button" class="text-button remove-question">移除本题</button>
+        <label class="question-label">投票题目<span>0 / 60</span></label>
+        <textarea maxlength="60" rows="2" required placeholder="例如：周末团建，你更想去哪里？"></textarea>
+        <div class="option-heading">
+          <label>投票选项 <small>2～6 项，每项最多 24 字</small></label>
+          <button type="button" class="text-button add-option">＋ 添加选项</button>
+        </div>
+        <div class="options"></div>
+      </fieldset>
+    </template>
     <template id="deadline-template">
       <label>截止方式
         <select name="mode">

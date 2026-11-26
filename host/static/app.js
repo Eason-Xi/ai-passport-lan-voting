@@ -83,8 +83,9 @@ function notice(message = "") {
   $("notice").textContent = message;
   $("notice").hidden = !message;
 }
-function addOption(value = "") {
-  if ($("options").children.length >= 6) return;
+function addOption(card) {
+  const options = card.querySelector(".options");
+  if (options.children.length >= 6) return;
   const row = document.createElement("div");
   row.className = "option";
   const letter = document.createElement("span");
@@ -92,29 +93,54 @@ function addOption(value = "") {
   const input = document.createElement("input");
   input.required = true;
   input.maxLength = 24;
-  input.value = value;
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "remove";
   remove.textContent = "×";
   remove.addEventListener("click", () => {
     row.remove();
-    labelOptions();
+    labelOptions(card);
   });
   row.append(letter, input, remove);
-  $("options").append(row);
-  labelOptions();
+  options.append(row);
+  labelOptions(card);
 }
-function labelOptions() {
-  [...$("options").children].forEach((row, i) => {
+function labelOptions(card) {
+  const rows = card.querySelector(".options").children;
+  [...rows].forEach((row, i) => {
     const label = String.fromCharCode(65 + i);
     row.firstChild.textContent = label;
     row.children[1].placeholder = `选项 ${label}`;
     row.children[1].setAttribute("aria-label", `选项 ${label}`);
-    row.lastChild.disabled = $("options").children.length <= 2;
+    row.lastChild.disabled = rows.length <= 2;
     row.lastChild.setAttribute("aria-label", `删除选项 ${label}`);
   });
-  $("add-option").disabled = $("options").children.length >= 6;
+  card.querySelector(".add-option").disabled = rows.length >= 6;
+}
+let questionSerial = 0;
+function addQuestion() {
+  const card = $("question-template").content.firstElementChild.cloneNode(true);
+  const title = card.querySelector("textarea"), label = card.querySelector(".question-label");
+  title.id = "question-" + (++questionSerial);
+  label.htmlFor = title.id;
+  title.oninput = () => { label.querySelector("span").textContent = `${[...title.value].length} / 60`; };
+  card.querySelector(".add-option").onclick = () => addOption(card);
+  card.querySelector(".remove-question").onclick = () => {
+    if ($("questions").children.length <= 1) return;
+    card.remove();
+    numberQuestions();
+  };
+  $("questions").append(card);
+  addOption(card);
+  addOption(card);
+  numberQuestions();
+  return title;
+}
+function numberQuestions() {
+  [...$("questions").children].forEach((card, i) => {
+    card.querySelector("legend").textContent = `第 ${i + 1} 题`;
+  });
+  updateButtons();
 }
 async function action(name, body) {
   if (!state || busy) return;
@@ -143,22 +169,41 @@ async function action(name, body) {
 }
 function updateButtons() {
   const p = state?.poll;
+  const size = $("questions").children.length;
+  $("add-question").disabled = !state || busy || size >= (state.max_batch_polls || 1);
+  $("add-question").textContent = state?.max_batch_polls && size >= state.max_batch_polls
+    ? `已达 ${state.max_batch_polls} 题上限` : "＋ 添加题目";
+  $("start").textContent = size > 1 ? `一次发起 ${size} 题` : "发起投票";
+  $("batch-deadline-note").hidden = size <= 1;
+  $("batch-deadline-note").textContent = `所选截止时间适用于这 ${size} 道题。`;
   $("start").disabled = busy || !state || (p && p.phase !== "published");
   $("close").disabled = busy || !p || p.phase !== "open";
   $("publish").disabled = busy || !p || p.phase === "published";
   $("save-deadline").disabled = busy || p?.phase !== "open";
+  $("show-result").disabled = busy || !state?.batch || p?.phase !== "published";
   newDeadline.mode.disabled = !state || !state.server_now_ms;
   $("deadline-upgrade").hidden = !state || !!state.server_now_ms;
   $("form-note").textContent =
     p && p.phase !== "published"
-      ? "请先公布当前题目结果，再发起新题。"
+      ? "请先公布当前投票的结果，再发起新题。"
       : "发起后，题目将同步到所有在线投票器。";
 }
 function render() {
-  const p = state.poll;
+  const batch = state.batch?.polls;
+  const picker = $("live-question");
+  $("batch-picker").hidden = !batch;
+  if (batch && picker.dataset.batch !== state.batch.id) {
+    picker.replaceChildren(...batch.map((q, i) => new Option(`第 ${i+1} 题 · ${q.title}`, q.id)));
+    picker.dataset.batch = state.batch.id;
+  }
+  const p = batch?.find(q => q.id === picker.value) || state.poll;
   $("join-code").textContent = state.join_code;
   $("online").textContent = state.devices.filter((d) => d.online).length;
-  $("votes").textContent = p?.total || 0;
+  $("votes-label").textContent = batch ? "本组已收票" : "本题已收票";
+  $("votes").textContent = batch ? batch.reduce((sum, q) => sum + q.total, 0) : p?.total || 0;
+  $("close").textContent = batch ? "整组截止收票" : "截止收票";
+  $("publish").textContent = batch ? "公布整组结果" : "公布结果";
+  $("edit-deadline").querySelector("summary").textContent = batch ? "调整整组截止时间" : "调整截止时间";
   const phases = {
     open: "正在收票",
     closed: "已截止",
@@ -169,13 +214,15 @@ function render() {
   $("live-badge").classList.toggle("active", p?.phase === "open");
   $("empty").hidden = !!p;
   $("live-poll").hidden = !p;
+  $("show-result").hidden = !batch || p?.phase !== "published";
   if (p) {
-    renderDeadline(p);
+    renderDeadline(state.poll);
     $("live-title").textContent = p.title;
     $("result-caption").textContent =
       p.phase === "published"
         ? "结果已同步至在线投票器；重连设备会自动补收。"
         : "票数仅主持人可见，公布后同步到投票器。";
+    if (batch) $("result-caption").textContent = `本题已收 ${p.total} 票 · ${$("result-caption").textContent}`;
     $("results").replaceChildren(
       ...p.options.map((option, i) => {
         const row = document.createElement("div");
@@ -214,7 +261,8 @@ function render() {
       const title = document.createElement("strong");
       title.textContent = d.id.toUpperCase();
       const detail = document.createElement("p");
-      detail.textContent = `${d.online ? "在线" : "离线"} · ${d.voted ? "已投票" : "未投票"}`;
+      const progress = batch ? `已答 ${d.answered} / ${batch.length} 题` : d.voted ? "已投票" : "未投票";
+      detail.textContent = `${d.online ? "在线" : "离线"} · ${progress}`;
       detail.className = d.voted ? "done" : "";
       box.append(title, detail);
       if (!d.online) {
@@ -256,33 +304,33 @@ async function refresh() {
     updateButtons();
   }
 }
-$("add-option").onclick = () => addOption();
-addOption();
-addOption();
-$("question").oninput = () => {
-  $("question-count").textContent = `${[...$("question").value].length} / 60`;
+$("add-question").onclick = () => addQuestion().focus();
+$("live-question").onchange = () => { if (state) render(); };
+$("show-result").onclick = () => {
+  if (state?.batch) action("show_result", {batch_id:state.batch.id, poll_id:$("live-question").value});
 };
+addQuestion();
 $("poll-form").onsubmit = (event) => {
   event.preventDefault();
-  const title = $("question").value.trim(),
-    options = [...$("options").querySelectorAll("input")].map((i) =>
-      i.value.trim(),
-    );
-  const unsupported = [
-    ...new Set(
-      [...title, ...options.join("")].filter(
-        (c) =>
-          !coverage.some(
-            ([a, b]) => c.codePointAt(0) >= a && c.codePointAt(0) <= b,
-          ),
-      ),
-    ),
-  ];
-  if (coverage.length && unsupported.length)
-    return notice(
-      `投票器字库暂不支持：${unsupported.slice(0, 12).join("")}，请换成常用汉字或英文。`,
-    );
-  try { action("create", { title, options, ...newDeadline.value() }); }
+  const questions = [...$("questions").children].map(card => ({
+    title: card.querySelector("textarea").value.trim(),
+    options: [...card.querySelectorAll(".options input")].map(input => input.value.trim()),
+  }));
+  for (const [i, q] of questions.entries()) {
+    if (!q.title || q.options.some(option => !option)) return notice(`请补全第 ${i + 1} 题的题目和选项。`);
+    if (new Set(q.options).size !== q.options.length) return notice(`第 ${i + 1} 题有重复选项。`);
+    if (coverage.length) {
+      const missing = [...new Set([...(q.title + q.options.join(""))].filter(c =>
+        !coverage.some(([a, b]) => c.codePointAt(0) >= a && c.codePointAt(0) <= b)))];
+      if (missing.length) return notice(`第 ${i + 1} 题的投票器字库暂不支持：${missing.slice(0, 12).join("")}。`);
+    }
+  }
+  try {
+    const settings = {...newDeadline.value(), previous_id: state?.poll?.id ?? null};
+    if (questions.length === 1) action("create", {...questions[0], ...settings});
+    else if (questions.length <= (state?.max_batch_polls || 1)) action("create_batch", {questions, ...settings});
+    else notice("请连接支持批量发题的主持台。");
+  }
   catch (error) { notice(error.message); }
 };
 $("close").onclick = () => action("close", { poll_id: state?.poll?.id });

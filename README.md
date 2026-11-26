@@ -4,11 +4,11 @@
 
 One computer hosts a poll for up to ten registered AI Passport voters. Each question has two to six options. A device locks its first confirmed choice for that question. The host sees live statistics and publishes the final result to all voters. The session runs on the local network.
 
-This repository contains the 0.3.0 voter firmware and host console. The voter uses an ESP32-C3, 8 MB of flash and three buttons. Board support comes from [AI Passport](https://github.com/Eason-Xi/ai-passport) under its original MIT license. The [project brief](docs/LAN_Voting_PRD_v0.1_重建版.md) is available in Simplified Chinese.
+This repository contains the 0.4.0 voter firmware and host console. The voter uses an ESP32-C3, 8 MB of flash and three buttons. Board support comes from [AI Passport](https://github.com/Eason-Xi/ai-passport) under its original MIT license. The [project brief](docs/LAN_Voting_PRD_v0.1_重建版.md) is available in Simplified Chinese.
 
 ## Run a session
 
-1. Install the host software as described below, then use the [host launcher](host/start.command) and open the [local console](http://127.0.0.1:8765). Find its six-digit enrollment code. When upgrading a running host, restart it with the same database.
+1. Install the host software as described below, then use the [host launcher](host/start.command) and open the [local console](http://127.0.0.1:8765). You can also use the [IPv6 loopback address](http://[::1]:8765) if the launcher lists it. Find the six-digit enrollment code. When upgrading a running host, restart it with the same database.
 2. Scan the QR code on the voter with a phone camera and join its hotspot. On supported phones the setup portal opens automatically. If it stays closed, scan the second code displayed after the phone joins, or open the [setup page](http://192.168.4.1/). UP/DOWN switches codes. The first screen also shows the hotspot name and password.
 3. Select the venue's 2.4 GHz Wi-Fi and enter its password and the enrollment code. Open networks hide the password field. Hidden networks allow manual entry. The voter finds the host automatically. If several hosts answer, tap the public identifier shown on the intended console. The device saves its settings and restarts after receiving a valid host snapshot. Wi-Fi, discovery and enrollment errors can be retried on the same page.
 4. Enter a question and options. Choose manual closing (the default), a duration of 30 seconds, 1 minute or 5 minutes, or a date and time in Beijing, then start voting. On each voter, UP/DOWN selects an option, OK opens confirmation, and the next OK submits. Either direction cancels confirmation. The success screen means the computer recorded the vote.
@@ -17,6 +17,14 @@ This repository contains the 0.3.0 voter firmware and host console. The voter us
 The computer can use Ethernet or Wi-Fi. Automatic discovery uses UDP 48765 on the same IPv4 subnet. Voting uses the host TCP port (8765 by default). Discovery carries a random challenge, a public host identifier and a port. A paired voter can find the same host after its IP address or port changes. Hosts using different databases have different identities. Hold OK and confirm reconfiguration to change hosts.
 
 If broadcasts are filtered or the host runs older software, expand manual host settings and enter a private IPv4 address such as `192.168.1.20` or `192.168.1.20:9876`. The console lists the full addresses under participating devices. Use a network that allows clients to communicate. Rejoin the device hotspot if the phone disconnects during a Wi-Fi channel change.
+
+## Open several questions together
+
+Fill in the first question, then use the add-question button for each additional one. A batch supports up to 50 questions with two to six distinct options per question. Choose a common deadline and start the batch with one click. If a question is invalid, the console identifies it and keeps the batch in the editor. All questions open together.
+
+Each voter starts with the first question and automatically advances once the host records its choice. Participants proceed at their own pace. The host locks the first vote per device and question and uses those records to resume after a disconnect or restart. Version 0.4 displays the current question number, the number answered and a completion message after the final vote.
+
+The console shows total votes across all questions, a picker for individual tallies and each device's progress. Closing or timing out applies to the entire batch. Publishing reveals the results. On 0.4 devices, press OK for the next result or hold UP/DOWN to move between questions. The host can select a question and show its results on every device. Earlier firmware can also answer in sequence and follow the host's result selection.
 
 ## Timed voting
 
@@ -75,4 +83,4 @@ python3 tools/render_vote_preview.py
 
 The ESP32-C3 uses the existing BSP and 8 MB partition layout. Flash **`build/FoloToy-AI-Passport-full.bin` at 0x0**. Its matching ELF, MAP, component images and SHA-256 manifest are in `build/firmware/<full-image-sha256>/`. Verify with `python3 tools/archive_firmware.py verify <directory>`.
 
-Versions 0.1, 0.2 and 0.3 share the partition and NVS layout. To retain settings when upgrading this layout, the matching archived application image can be written at its application offset of 0x10000. Existing fixed endpoints continue to work, and reprovisioning enables discovery by host identity. A merged write at 0x0 may clear NVS. Obtain approval for this image before flashing. On hardware, verify boot, all three buttons, Chinese text, battery, provisioning, countdown and reconnection on one voter. Conduct a three-voter session before testing ten physical units and longer operation. Serial diagnostics report free heap, largest free block and main task stack headroom.
+Versions 0.1 through 0.4 share the partition and NVS layout. To retain settings when upgrading this layout, the matching archived application image can be written at its application offset of 0x10000. Existing fixed endpoints continue to work, and reprovisioning enables discovery by host identity. A merged write at 0x0 may clear NVS. Obtain approval for this image before flashing. On hardware, verify boot, all three buttons, Chinese text, battery, provisioning, automatic question advance, countdown and reconnection on one voter. Conduct a three-voter session before testing ten physical units and longer operation. Serial diagnostics report free heap, largest free block and main task stack headroom.

@@ -21,6 +21,7 @@ fi
     -o build/vote-tests/protocol
 build/vote-tests/protocol build/vote-wire.jsonl
 build/vote-tests/protocol build/vote-timed-wire.jsonl
+build/vote-tests/protocol build/vote-batch-wire.jsonl
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
     -Imain tests/test_vote_model.c main/vote_model.c main/vote_settings.c \
     -o build/vote-tests/model

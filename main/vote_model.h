@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #define VOTE_MAX_OPTIONS 6
+#define VOTE_MAX_BATCH 50
 #define VOTE_TITLE_BYTES 241
 #define VOTE_OPTION_BYTES 97
 #define VOTE_MESSAGE_BYTES 2048
@@ -18,6 +19,8 @@ typedef struct {
     int my_choice;
     int counts[VOTE_MAX_OPTIONS];
     int total;
+    int batch_index, batch_count, answered;
+    char next_id[17], prev_id[17];
 } vote_snapshot_t;
 typedef struct {
     vote_snapshot_t poll;

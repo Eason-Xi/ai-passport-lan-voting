@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "host" / "static"
 MAX_DEVICES = 10
 MAX_MESSAGE = 4096
+MAX_BATCH_POLLS = 50
 MAX_DEADLINE_MS = 253402300799999  # 公历 9999 年末的 Unix 毫秒数。
 DISCOVERY_PORT = 48765
 DISCOVERY_NETWORKS = tuple(map(ipaddress.IPv4Network, ("10.0.0.0/8", "172.16.0.0/12",
@@ -60,6 +61,19 @@ def read_deadline(data: dict, now: int) -> int | None:
     return deadline
 
 
+def read_question(data: dict) -> tuple[str, str]:
+    if not isinstance(data, dict):
+        raise ValueError("题目格式无效")
+    title = supported_text(data.get("title"), 60, "题目")
+    raw = data.get("options")
+    if not isinstance(raw, list) or not 2 <= len(raw) <= 6:
+        raise ValueError("需要 2～6 个选项")
+    options = [supported_text(option, 24, "选项") for option in raw]
+    if len(set(options)) != len(options):
+        raise ValueError("选项不能重复")
+    return title, json.dumps(options, ensure_ascii=False)
+
+
 class Store:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,7 +86,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, seen REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS polls (
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, options TEXT NOT NULL,
-                phase TEXT NOT NULL, created REAL NOT NULL, deadline_at_ms INTEGER
+                phase TEXT NOT NULL, created REAL NOT NULL, deadline_at_ms INTEGER, batch_id TEXT
             );
             CREATE TABLE IF NOT EXISTS votes (
                 poll_id TEXT NOT NULL, device_id TEXT NOT NULL, choice INTEGER NOT NULL,
@@ -81,8 +95,13 @@ class Store:
         """)
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
-            if "deadline_at_ms" not in {r["name"] for r in self.db.execute("PRAGMA table_info(polls)")}:
+            columns = {r["name"] for r in self.db.execute("PRAGMA table_info(polls)")}
+            if "deadline_at_ms" not in columns:
                 self.db.execute("ALTER TABLE polls ADD COLUMN deadline_at_ms INTEGER")
+            if "batch_id" not in columns:
+                self.db.execute("ALTER TABLE polls ADD COLUMN batch_id TEXT")
+            self.db.execute("UPDATE polls SET batch_id=id WHERE batch_id IS NULL")
+            self.db.execute("CREATE INDEX IF NOT EXISTS polls_by_batch ON polls(batch_id)")
             self.db.execute("INSERT OR IGNORE INTO settings VALUES ('join_code', ?)", (f"{secrets.randbelow(1000000):06d}",))
             # 会场标识可公开，随数据库保留；入场码只用于 WebSocket 登记。
             self.db.execute("INSERT OR IGNORE INTO settings VALUES ('host_id', ?)", (secrets.token_hex(8),))
@@ -91,8 +110,8 @@ class Store:
         self.host_id = settings["host_id"]
 
     def _latest(self):
-        # 以插入顺序选题，电脑离线校时不会令已结束的旧题重新成为当前题。
-        return self.db.execute("SELECT * FROM polls ORDER BY rowid DESC LIMIT 1").fetchone()
+        # 批次用首题编号标识，按插入顺序定位，避免电脑校时改变当前场次。
+        return self.db.execute("SELECT * FROM polls WHERE id=(SELECT batch_id FROM polls ORDER BY rowid DESC LIMIT 1)").fetchone()
 
     @staticmethod
     def _due(poll, now: int) -> bool:
@@ -109,7 +128,7 @@ class Store:
                     yield poll, now
                     return
                 # 单独提交自动截止。即使下一笔操作因迟到被拒，截止状态也必须保留。
-                self.db.execute("UPDATE polls SET phase='closed' WHERE id=?", (poll["id"],))
+                self.db.execute("UPDATE polls SET phase='closed' WHERE batch_id=?", (poll["id"],))
 
     def current(self, now=None):
         poll = self._latest()
@@ -129,19 +148,34 @@ class Store:
                             (device, time.time()))
 
     def create(self, data: dict):
-        title = supported_text(data.get("title"), 60, "题目")
-        raw = data.get("options")
-        if not isinstance(raw, list) or not 2 <= len(raw) <= 6:
-            raise ValueError("需要 2～6 个选项")
-        options = [supported_text(o, 24, "选项") for o in raw]
-        if len(set(options)) != len(options):
-            raise ValueError("选项不能重复")
+        self._create_questions([data], data)
+
+    def create_batch(self, data: dict):
+        questions = data.get("questions")
+        if not isinstance(questions, list) or not 2 <= len(questions) <= MAX_BATCH_POLLS:
+            raise ValueError(f"批量发题需要 2～{MAX_BATCH_POLLS} 道题")
+        self._create_questions(questions, data)
+
+    def _create_questions(self, questions: list, data: dict):
+        entries = []
+        for i, question in enumerate(questions, 1):
+            try:
+                entries.append(read_question(question))
+            except ValueError as exc:
+                if len(questions) == 1:
+                    raise
+                raise ValueError(f"第 {i} 题：{exc}") from exc
         with self._locked_poll() as (poll, now):
             if poll and poll["phase"] != "published":
-                raise ValueError("请先公布当前题目的结果，再发起新题")
+                raise ValueError("请先公布当前投票的结果，再发起新题")
+            if "previous_id" in data and data["previous_id"] != (poll["id"] if poll else None):
+                raise ValueError("当前投票已变更，请刷新后操作")
             deadline = read_deadline(data, now)
-            self.db.execute("INSERT INTO polls (id, title, options, phase, created, deadline_at_ms) VALUES (?, ?, ?, 'open', ?, ?)",
-                            (secrets.token_hex(8), title, json.dumps(options, ensure_ascii=False), now / 1000, deadline))
+            batch_id = secrets.token_hex(8)
+            self.db.executemany(
+                "INSERT INTO polls (id,title,options,phase,created,deadline_at_ms,batch_id) VALUES (?,?,?,'open',?,?,?)",
+                ((batch_id if i == 0 else secrets.token_hex(8), title, options, now / 1000, deadline, batch_id)
+                 for i, (title, options) in enumerate(entries)))
 
     def change_deadline(self, data: dict):
         with self._locked_poll() as (poll, now):
@@ -152,7 +186,7 @@ class Store:
             if "duration_seconds" not in data and "deadline_at_ms" not in data:
                 raise ValueError("请选择截止方式")
             deadline = read_deadline(data, now)
-            self.db.execute("UPDATE polls SET deadline_at_ms=? WHERE id=?", (deadline, poll["id"]))
+            self.db.execute("UPDATE polls SET deadline_at_ms=? WHERE batch_id=?", (deadline, poll["id"]))
 
     def transition(self, poll_id: object, phase: str):
         with self._locked_poll() as (poll, _):
@@ -162,11 +196,23 @@ class Store:
                 raise ValueError("当前题目已截止")
             if phase == "published" and poll["phase"] == "published":
                 return
-            self.db.execute("UPDATE polls SET phase=? WHERE id=?", (phase, poll_id))
+            self.db.execute("UPDATE polls SET phase=? WHERE batch_id=?", (phase, poll_id))
+
+    def show_result(self, batch_id, poll_id):
+        with self._locked_poll() as (batch, _):
+            if not batch or batch["id"] != batch_id or batch["phase"] != "published":
+                raise ValueError("请先公布本组结果")
+            if not isinstance(poll_id, str) or not self.db.execute(
+                    "SELECT 1 FROM polls WHERE id=? AND batch_id=?", (poll_id, batch_id)).fetchone():
+                raise ValueError("该题不在当前投票中")
+            self.db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('shown_result',?)", (poll_id,))
 
     def vote(self, device: str, poll_id: object, choice: object):
-        with self._locked_poll() as (poll, now):
-            if not poll or poll_id != poll["id"]:
+        with self._locked_poll() as (batch, now):
+            poll = None
+            if batch and isinstance(poll_id, str):
+                poll = self.db.execute("SELECT * FROM polls WHERE batch_id=? AND id=?", (batch["id"], poll_id)).fetchone()
+            if not poll:
                 raise ValueError("题目已变更，本次提交未计票")
             old = self.db.execute("SELECT choice FROM votes WHERE poll_id=? AND device_id=?",
                                   (poll_id, device)).fetchone()
@@ -179,32 +225,64 @@ class Store:
                 raise ValueError("投票已截止，本次提交未计票")
             if type(choice) is not int or not 0 <= choice < len(json.loads(poll["options"])):
                 raise ValueError("选项编号无效")
+            # 先确认原票，再检查个人顺序。丢失回执时重发上一题不会妨碍下一题。
+            first = self.db.execute("SELECT p.id FROM polls p WHERE p.batch_id=? AND NOT EXISTS "
+                                    "(SELECT 1 FROM votes v WHERE v.poll_id=p.id AND v.device_id=?) "
+                                    "ORDER BY p.rowid LIMIT 1", (batch["id"], device)).fetchone()
+            if first is None or first[0] != poll_id:
+                raise ValueError("请先完成上一题，本次提交未计票")
             self.db.execute("INSERT INTO votes VALUES (?, ?, ?, ?)", (poll_id, device, choice, now / 1000))
 
-    def snapshot(self, device: str | None = None):
+    def snapshot(self, device: str | None = None, viewed_id: str | None = None):
         now = clock_ms()
-        poll = self.current(now)
+        batch = self.current(now)
         state = {"v": 1, "type": "state", "poll": None}
         if device is None:
             state["server_now_ms"] = now
-        if not poll:
+        if not batch:
             return state
+        rows = self.db.execute("SELECT * FROM polls WHERE batch_id=? ORDER BY rowid", (batch["id"],)).fetchall()
+        published = batch["phase"] == "published"
+        shown = None
+        if published and len(rows) > 1:
+            setting = self.db.execute("SELECT value FROM settings WHERE key='shown_result'").fetchone()
+            shown = setting[0] if setting and any(p["id"] == setting[0] for p in rows) else batch["id"]
+        if device is None:
+            items = [self._poll_item(p, now, -1, True) for p in rows]
+            state["poll"] = items[0]
+            if len(rows) > 1:
+                state["batch"] = {"id": batch["id"], "polls": items, "shown_result": shown}
+            return state
+        mine = dict(self.db.execute("SELECT v.poll_id,v.choice FROM votes v JOIN polls p ON p.id=v.poll_id "
+                                    "WHERE p.batch_id=? AND v.device_id=?", (batch["id"], device)))
+        ids = [p["id"] for p in rows]
+        if published:
+            result_id = viewed_id if viewed_id in ids else shown
+            index = ids.index(result_id) if result_id else 0
+        else:
+            index = next((i for i, pid in enumerate(ids) if pid not in mine), len(rows)-1)
+        poll = rows[index]
+        item = self._poll_item(poll, now, mine.get(poll["id"], -1), published)
+        if len(rows) > 1:
+            item["batch"] = {"index": index+1, "count": len(rows), "answered": len(mine)}
+            if published:
+                item["batch"].update(next=ids[(index+1) % len(rows)], prev=ids[index-1])
+        state["poll"] = item
+        return state
+
+    def _poll_item(self, poll, now, choice, show_counts):
         options = json.loads(poll["options"])
-        votes = list(self.db.execute("SELECT device_id, choice FROM votes WHERE poll_id=?", (poll["id"],)))
-        item = dict(id=poll["id"], title=poll["title"], options=options, phase=poll["phase"], my_choice=-1)
+        item = dict(id=poll["id"], title=poll["title"], options=options, phase=poll["phase"], my_choice=choice)
         if poll["deadline_at_ms"] is not None:
             item["deadline_at_ms"] = poll["deadline_at_ms"]
             if poll["phase"] == "open":
                 item["remaining_ms"] = max(0, poll["deadline_at_ms"] - now)
-        for vote in votes:
-            if vote["device_id"] == device:
-                item["my_choice"] = vote["choice"]
-        # 未公布前不向设备发送票数，防止通过协议提前窥见结果。
-        if device is None or poll["phase"] == "published":
-            item["counts"] = [sum(v["choice"] == i for v in votes) for i in range(len(options))]
-            item["total"] = len(votes)
-        state["poll"] = item
-        return state
+        if show_counts:
+            counts = [0] * len(options)
+            for option, total in self.db.execute("SELECT choice,COUNT(*) FROM votes WHERE poll_id=? GROUP BY choice", (poll["id"],)):
+                counts[option] = total
+            item.update(counts=counts, total=sum(counts))
+        return item
 
 
 class HostDiscovery(asyncio.DatagramProtocol):
@@ -228,6 +306,7 @@ class VotingService:
     def __init__(self, path: Path, port: int = 8765, discovery_port: int = DISCOVERY_PORT):
         self.store = Store(path)
         self.clients: dict[str, web.WebSocketResponse] = {}
+        self.viewed: dict[str, str] = {}
         self.port = port
         self.admin_nonce = secrets.token_urlsafe(24)
         self.broadcast_lock = asyncio.Lock()
@@ -259,7 +338,8 @@ class VotingService:
 
     async def send_state(self, device: str, ws: web.WebSocketResponse):
         try:
-            await asyncio.wait_for(ws.send_json(self.store.snapshot(device), dumps=lambda x: json.dumps(x, ensure_ascii=False)), 2)
+            state = self.store.snapshot(device, self.viewed.get(device))
+            await asyncio.wait_for(ws.send_json(state, dumps=lambda x: json.dumps(x, ensure_ascii=False)), 2)
         except (ConnectionError, RuntimeError, asyncio.TimeoutError):
             await ws.close()
 
@@ -309,6 +389,16 @@ class VotingService:
                     if data.get("type") == "vote":
                         self.store.vote(device, data.get("poll_id"), data.get("choice"))
                         await self.broadcast()
+                    elif data.get("type") == "view":
+                        requested = data.get("poll_id")
+                        if not isinstance(requested, str) or not re.fullmatch(r"[0-9a-f]{16}", requested):
+                            raise ValueError("题目编号无效")
+                        batch = self.store.current()
+                        if not batch or batch["phase"] != "published" or not self.store.db.execute(
+                                "SELECT 1 FROM polls WHERE id=? AND batch_id=?", (requested, batch["id"])).fetchone():
+                            raise ValueError("请等待主持人公布本组结果")
+                        self.viewed[device] = requested
+                        await self.send_state(device, ws)
                     elif data.get("type") == "sync":
                         await self.send_state(device, ws)
                     else:
@@ -324,6 +414,7 @@ class VotingService:
         finally:
             if device and self.clients.get(device) is ws:
                 del self.clients[device]
+                self.viewed.pop(device, None)
             await ws.close()
         return ws
 
@@ -346,10 +437,13 @@ class VotingService:
         state = self.store.snapshot()
         state.update(join_code=self.store.join_code, nonce=self.admin_nonce, max_devices=MAX_DEVICES,
                      addresses=self.addresses, port=self.port, host_id=self.store.host_id,
-                     discovery_available=self.discovery is not None)
+                     discovery_available=self.discovery is not None, max_batch_polls=MAX_BATCH_POLLS)
         current_id = state["poll"]["id"] if state["poll"] else ""
-        voted = {r[0] for r in self.store.db.execute("SELECT device_id FROM votes WHERE poll_id=?", (current_id,))}
-        state["devices"] = [dict(id=r["id"], online=r["id"] in self.clients, voted=r["id"] in voted)
+        answered = dict(self.store.db.execute("SELECT v.device_id, COUNT(*) FROM votes v JOIN polls p ON p.id=v.poll_id "
+                                               "WHERE p.batch_id=? GROUP BY v.device_id", (current_id,)))
+        question_count = len(state["batch"]["polls"]) if "batch" in state else 1
+        state["devices"] = [dict(id=r["id"], online=r["id"] in self.clients, answered=answered.get(r["id"], 0),
+                                 voted=answered.get(r["id"], 0) == question_count)
                             for r in self.store.db.execute("SELECT * FROM devices ORDER BY id")]
         return web.json_response(state)
 
@@ -362,10 +456,17 @@ class VotingService:
             action = request.match_info["action"]
             if action == "create":
                 self.store.create(data)
+            elif action == "create_batch":
+                self.store.create_batch(data)
             elif action == "deadline":
                 self.store.change_deadline(data)
             elif action in ("close", "publish"):
                 self.store.transition(data.get("poll_id"), "closed" if action == "close" else "published")
+                if action == "publish":
+                    self.viewed.clear()
+            elif action == "show_result":
+                self.store.show_result(data.get("batch_id"), data.get("poll_id"))
+                self.viewed.clear()
             elif action == "forget":
                 device = data.get("device_id")
                 if not isinstance(device, str):
@@ -376,7 +477,7 @@ class VotingService:
                     self.store.db.execute("DELETE FROM devices WHERE id=?", (device,))
             else:
                 raise ValueError("操作无效")
-            if action in ("create", "deadline", "close", "publish"):
+            if action in ("create", "create_batch", "deadline", "close", "publish"):
                 self.deadline_changed.set()
             await self.broadcast()
             return web.json_response({"ok": True})
@@ -416,7 +517,8 @@ class VotingService:
             print(f"主持台自动发现暂不可用（{exc}），仍可手动填写局域网地址。", flush=True)
 
     def app(self):
-        app = web.Application(client_max_size=MAX_MESSAGE)
+        # 主持表单可包含整组中文选项。投票器仍使用单题快照和原来的 WebSocket 大小限制。
+        app = web.Application(client_max_size=128 * 1024)
         app.router.add_get("/ws", self.ws_device)
         app.router.add_get("/api/state", self.admin_state)
         app.router.add_post("/api/{action}", self.admin_action)
@@ -445,8 +547,14 @@ def main():
     if not 1 <= args.port <= 65535:
         parser.error("端口须为 1～65535")
     service = VotingService(args.data, args.port)
-    print(f"主持台：http://127.0.0.1:{args.port}   入场码：{service.store.join_code}", flush=True)
-    web.run_app(service.app(), host="0.0.0.0", port=args.port, access_log=None)
+    # 本机网页也可以走 IPv6 回环，投票器仍通过原来的局域网 IPv4 地址入场。
+    loopback = None
+    if socket.has_ipv6:
+        with suppress(OSError):
+            loopback = socket.create_server(("::1", args.port), family=socket.AF_INET6)
+    alternate = f" 或 http://[::1]:{args.port}" if loopback else ""
+    print(f"主持台：http://127.0.0.1:{args.port}{alternate}   入场码：{service.store.join_code}", flush=True)
+    web.run_app(service.app(), host="0.0.0.0", port=args.port, sock=loopback, access_log=None)
 
 
 if __name__ == "__main__":
