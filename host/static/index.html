@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>共选 · 局域网投票</title>
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="/" aria-label="共选首页"
+        ><span class="mark">共</span
+        ><span>共选<small>LAN VOTING</small></span></a
+      >
+      <div class="connection">
+        <i id="dot"></i><span id="connection">连接主持服务中</span
+        ><span class="local">本地运行</span>
+      </div>
+    </header>
+    <main>
+      <section class="intro">
+        <div>
+          <h1>投票主持台</h1>
+          <p>参与者使用投票器作答，公布后可在设备上查看结果。</p>
+        </div>
+        <div class="session">
+          <span>设备入场码</span><strong id="join-code">------</strong
+          ><small>在手机配网页输入一次</small>
+        </div>
+      </section>
+      <div id="notice" role="status" aria-live="polite" hidden></div>
+      <section class="metrics">
+        <div>
+          <span>在线设备</span
+          ><strong><b id="online">0</b><small> / 10 台</small></strong>
+        </div>
+        <div>
+          <span>本题已收票</span
+          ><strong><b id="votes">0</b><small> 票</small></strong>
+        </div>
+        <div><span>当前阶段</span><strong id="phase">等待发起</strong></div>
+      </section>
+      <div class="workspace">
+        <section class="panel editor">
+          <div class="panel-heading">
+            <h2>新建投票</h2>
+            <span class="pill">单选 · 首票锁定</span>
+          </div>
+          <form id="poll-form">
+            <label for="question"
+              >投票题目<span id="question-count">0 / 60</span></label
+            ><textarea
+              id="question"
+              maxlength="60"
+              rows="2"
+              required
+              placeholder="例如：周末团建，你更想去哪里？"
+            ></textarea>
+            <div class="option-heading">
+              <label>投票选项 <small>2～6 项，每项最多 24 字</small></label
+              ><button type="button" class="text-button" id="add-option">
+                ＋ 添加选项
+              </button>
+            </div>
+            <div id="options"></div>
+            <p class="help">
+              支持常用简体汉字、英文与标点。超出设备字库的文字会在发起前提示。
+            </p>
+            <div class="deadline-fields" id="new-deadline"></div>
+            <p class="help" id="deadline-upgrade" hidden>当前主持服务仅支持手动截止。用原数据库重启新版服务即可定时收票。</p>
+            <button class="primary" id="start" type="submit">
+              发起投票 <span>↗</span>
+            </button>
+            <p class="form-note" id="form-note">
+              发起后，题目将同步到所有在线投票器。
+            </p>
+          </form>
+        </section>
+        <section class="panel live">
+          <div class="panel-heading">
+            <h2>实时计票</h2>
+            <span class="pill" id="live-badge">等待开始</span>
+          </div>
+          <div id="empty">
+            <div class="ballot" aria-hidden="true">✓</div>
+            <h3>尚未发起投票</h3>
+            <p>填写题目和至少两个选项后即可发起。</p>
+          </div>
+          <div id="live-poll" hidden>
+            <h3 id="live-title"></h3>
+            <p id="result-caption">票数仅主持人可见，公布后同步到投票器。</p>
+            <div class="deadline-status">
+              <strong id="time-left"></strong><span id="deadline-time"></span>
+              <details id="edit-deadline" hidden>
+                <summary>调整截止时间</summary>
+                <form id="deadline-form">
+                  <div class="deadline-fields" id="active-deadline"></div>
+                  <button class="secondary" id="save-deadline" type="submit">保存截止设置</button>
+                </form>
+              </details>
+            </div>
+            <div id="results"></div>
+            <div class="actions">
+              <button id="close" class="secondary" type="button">
+                截止收票</button
+              ><button id="publish" class="primary" type="button">
+                公布结果
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+      <section class="panel devices">
+        <div class="panel-heading">
+          <h2>参与设备</h2>
+          <span id="device-count" class="pill">0 台已登记</span>
+        </div>
+        <div class="network">
+          <span id="discovery-status">正在检查自动发现…</span>
+          <p>手机扫投票器屏幕上的二维码，选择现场 Wi-Fi 并输入入场码。</p>
+          <details><summary>手动连接或使用旧版投票器</summary>
+            <code id="server-address">正在读取本机局域网地址…</code>
+          </details>
+        </div>
+        <div id="device-list"></div>
+      </section>
+      <footer>
+        共选 · 局域网多人互动投票器<span>数据保存在这台电脑 · 无需互联网</span>
+      </footer>
+    </main>
+    <template id="deadline-template">
+      <label>截止方式
+        <select name="mode">
+          <option value="manual">手动截止</option>
+          <option value="30">30 秒后</option>
+          <option value="60">1 分钟后</option>
+          <option value="300">5 分钟后</option>
+          <option value="custom">指定日期和时间</option>
+        </select>
+      </label>
+      <label hidden>截止时间（北京时间）
+        <input name="at" type="datetime-local" step="1" />
+      </label>
+    </template>
+  </body>
+</html>

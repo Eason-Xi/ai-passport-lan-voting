@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>共选 · 投票器入场</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f4f5ef; color: #193c39; font: 16px/1.5 system-ui, sans-serif; }
+    main { width: min(100%, 440px); margin: 0 auto; padding: 28px 20px 40px; }
+    h1 { font-size: 29px; margin: 0 0 6px; }
+    p { margin: 0 0 20px; }
+    label { display: block; font-weight: 650; }
+    form, #rooms { padding: 20px; border-radius: 16px; background: white; }
+    input, select, button { font: inherit; }
+    input, select { display: block; width: 100%; border: 1px solid #9baea3; border-radius: 8px; padding: 10px; margin: 5px 0 16px; }
+    button, summary { cursor: pointer; }
+    button { border: 0; background: #176756; color: white; padding: 11px 16px; border-radius: 8px; }
+    #submit, #rooms button { width: 100%; margin-top: 12px; }
+    #refresh { color: #176756; background: transparent; padding: 0; font-size: 14px; }
+    .row { display: flex; align-items: baseline; justify-content: space-between; }
+    summary, small { color: #4d655c; }
+    summary { padding: 8px 0; }
+    #status { margin: 16px 0; padding: 12px 14px; border-radius: 8px; background: #e0eadc; }
+    button:disabled { opacity: .55; cursor: wait; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body><main>
+  <h1>投票器入场</h1>
+  <p>选择主持电脑所在的 2.4 GHz 网络，设备会自动寻找主持台。</p>
+  <form id="form">
+    <div class="row"><label for="wifi">现场 Wi-Fi</label><button id="refresh" type="button">刷新列表</button></div>
+    <select id="wifi" required><option value="">正在查找附近网络…</option><option value="manual">手动输入网络名</option></select>
+    <div id="manual-name" hidden><label for="ssid">Wi-Fi 名称</label><input id="ssid" maxlength="32" autocomplete="off"></div>
+    <div id="password-row"><label for="password">Wi-Fi 密码</label><input id="password" type="password" maxlength="63" autocomplete="off"></div>
+    <label for="code">主持台六位入场码</label>
+    <input id="code" required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="off" placeholder="见电脑主持台">
+    <details><summary>手动指定主持电脑</summary>
+      <label for="server">电脑地址</label>
+      <input id="server" maxlength="95" autocomplete="off" autocapitalize="none" placeholder="例如 192.168.1.20，留空自动寻找">
+    </details>
+    <button id="submit" type="submit">连接并入场</button>
+  </form>
+  <p id="status" role="status" aria-live="polite">连接成功后，投票器会记住本次配置。</p>
+  <section id="rooms" hidden><strong>选择电脑主持台显示的编号</strong><div id="choices"></div></section>
+  <small>如手机提示这个热点无法上网，请选择保持连接。</small>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  let networks = [], busy = false, finished = false, submitting = false, scans = 0;
+  let activeScan = 0, lastChoices = "";
+  function chosen() {
+    const value = $("wifi").value;
+    return value !== "" && value !== "manual" ? networks[Number(value)] : null;
+  }
+  function fields() {
+    const manual = $("wifi").value === "manual", open = chosen()?.open;
+    $("manual-name").hidden = !manual;
+    $("ssid").required = manual;
+    $("password-row").hidden = !!open;
+    $("password").required = !!chosen() && !open;
+    $("password").minLength = $("password").required ? 8 : 0;
+    $("refresh").disabled = busy || submitting;
+    $("submit").disabled = busy || submitting || finished;
+  }
+  $("wifi").onchange = fields;
+  async function scan(refresh, generation) {
+    try {
+      const r = await fetch("/networks" + (refresh ? "?refresh=1" : ""), {cache:"no-store"});
+      if (!r.ok) throw Error();
+      const data = await r.json();
+      if (generation !== activeScan) return;
+      const previous = chosen()?.ssid, manual = $("wifi").value === "manual";
+      networks = data.networks;
+      const placeholder = data.scanning ? "正在查找附近网络…" : "请选择现场 Wi-Fi";
+      $("wifi").replaceChildren(new Option(placeholder, ""),
+        ...networks.map((n,i) => new Option(n.ssid + (n.open ? "（开放）" : ""), String(i))),
+        new Option("手动输入网络名", "manual"));
+      if (manual) $("wifi").value = "manual";
+      else if (previous) {
+        const i = networks.findIndex(n => n.ssid === previous);
+        if (i >= 0) $("wifi").value = String(i);
+      }
+      if (data.scanning && scans++ < 10) setTimeout(() => scan(false, generation), 800);
+      else if (!networks.length && !data.scanning) $("wifi").value = "manual";
+    } catch {
+      if (generation === activeScan && !networks.length) $("wifi").value = "manual";
+    }
+    fields();
+  }
+  $("refresh").onclick = () => { scans = 0; scan(true, ++activeScan); };
+  async function submit(data) {
+    submitting = true; fields();
+    try {
+      const r = await fetch("/config", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(data)});
+      $("status").textContent = await r.text();
+      if (r.ok) { busy = true; $("rooms").hidden = true; lastChoices = ""; }
+    } catch { $("status").textContent = "连接暂时中断，请保持连接投票器热点。"; }
+    finally { submitting = false; fields(); }
+  }
+  $("form").onsubmit = event => {
+    event.preventDefault();
+    if (busy || submitting || finished) return;
+    const n = chosen();
+    const name = n ? n.ssid : $("ssid").value;
+    if (new TextEncoder().encode(name).length > 32) {
+      $("status").textContent = "网络名称超过 32 字节"; return;
+    }
+    let server = $("server").value.trim();
+    if (/^[\d.]+(:\d+)?$/.test(server)) server = "ws://" + server + (server.includes(":") ? "" : ":8765") + "/ws";
+    submit({ssid:name, password:n?.open ? "" : $("password").value, code:$("code").value.trim(), server});
+  };
+  async function poll() {
+    try {
+      const r = await fetch("/status", {cache:"no-store"});
+      if (!r.ok) throw Error();
+      const s = await r.json();
+      if (!submitting) {
+        busy = s.busy;
+        if (s.status !== 0) $("status").textContent = s.message;
+        const ids = s.hosts || [];
+        if (lastChoices !== ids.join(",")) {
+          lastChoices = ids.join(",");
+          $("choices").replaceChildren(...ids.map(id => {
+            const button = document.createElement("button");
+            button.type = "button"; button.textContent = "主持台 " + id.slice(-8).toUpperCase();
+            button.onclick = () => { if (!busy && !submitting) submit({host_id:id}); };
+            return button;
+          }));
+        }
+        $("rooms").hidden = !ids.length;
+        finished = s.status === 2;
+        if (finished) $("status").textContent = "入场成功。手机可以返回原 Wi-Fi，投票器会自动重连。";
+        fields();
+      }
+    } catch { if (busy) $("status").textContent = "网络正在切换，请保持连接设备热点，并留意投票器屏幕。"; }
+    if (!finished) setTimeout(poll, 1000);
+  }
+  scan(false, ++activeScan); poll();
+</script></body></html>

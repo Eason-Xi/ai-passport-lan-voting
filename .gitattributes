@@ -1,0 +1,4 @@
+# 字形位图和覆盖范围由转换器生成，位图保留原始格式以匹配字库清单中的校验值。
+assets/fonts/vote_zh18.c linguist-generated=true whitespace=-blank-at-eof
+main/vote_font_ranges.h linguist-generated=true
+host/static/font-coverage.json linguist-generated=true

@@ -1,0 +1,12 @@
+{
+  "converter": "lv_font_conv 1.5.3",
+  "source": "SourceHanSansSC-Regular.otf",
+  "source_sha256": "f1d8611151880c6c336aabeac4640ef434fa13cbfbf1ffe82d0a71b2a5637256",
+  "license": "SIL Open Font License 1.1",
+  "count": 6994,
+  "files": {
+    "assets/fonts/vote_zh18.c": "bdbab65be1331c84329de7af9262e081fa2bf46fcf284edee156010cc9a409db",
+    "main/vote_font_ranges.h": "330e0f8b21f0b5d1eb3a9664ef3b532ab2f51f6d7fa3034f37cadcbeac79394a",
+    "host/static/font-coverage.json": "79c497311cfb032200a9616ccea0ecef766d40743f28db3c4dddf10796826b85"
+  }
+}

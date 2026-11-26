@@ -1,0 +1,12 @@
+/build/
+/managed_components/
+/sdkconfig
+/sdkconfig.old
+/.venv/
+/host/data/
+__pycache__/
+*.py[cod]
+node_modules/
+.DS_Store
+.vscode/
+.idea/
