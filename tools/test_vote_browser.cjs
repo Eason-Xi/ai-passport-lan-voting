@@ -48,6 +48,7 @@ async function checkBatch(page) {
   await cards.nth(2).getByLabel("选项 B",{exact:true}).fill("否");
   await start.click();
   await page.locator("#live-title").getByText("集合地点",{exact:true}).waitFor();
+  await page.getByRole("status").getByText(/推送至 10 台在线投票器/).waitFor();
   const state = await (await fetch(base+"/api/state")).json();
   const polls = state.batch.polls;
   assert.equal(polls.length,3);
@@ -62,6 +63,48 @@ async function checkBatch(page) {
   await page.locator("#live-title").getByText("先去哪里",{exact:true}).waitFor();
   await page.locator("#result-caption").getByText(/本题已收 1 票/).waitFor();
   await page.screenshot({path:path.join(output,"batch-live.png"),fullPage:true});
+  const append = page.locator("#append-form");
+  await append.getByText(/排在第 4 题/).waitFor();
+  const title = append.getByLabel("追加题目");
+  assert.equal(await title.inputValue(), "");
+  await title.fill("临时加一站吗");
+  await append.getByLabel("选项 A",{exact:true}).fill("是");
+  await append.getByLabel("选项 B",{exact:true}).fill("是");
+  await append.getByRole("button",{name:"追加并推送"}).click();
+  await page.getByRole("status").getByText(/追加题目有重复选项/).waitFor();
+  await page.getByRole("button",{name:"准备下一场投票"}).click();
+  assert.equal(await cards.nth(0).getByLabel("投票题目").inputValue(), "集合地点");
+  await page.getByRole("button",{name:"返回本场追加题目"}).click();
+  assert.equal(await title.inputValue(), "临时加一站吗");
+  await append.getByLabel("选项 B",{exact:true}).fill("否");
+  const submittedIds = [];
+  await page.route("**/api/append_question", async route => {
+    submittedIds.push(route.request().postDataJSON().question_id);
+    const response = await route.fetch();
+    // 第一次请求已经落库，但浏览器没有收到完整回执。
+    if (submittedIds.length === 1) await route.fulfill({status:200, contentType:"application/json", body:""});
+    else await route.fulfill({response});
+  });
+  await append.getByRole("button",{name:"追加并推送"}).click();
+  await page.getByRole("status").getByText(/未收到主持服务的确认/).waitFor();
+  assert.equal(await title.inputValue(), "临时加一站吗");
+  await append.getByRole("button",{name:"追加并推送"}).click();
+  await page.getByRole("status").getByText(/新题已追加，已同步至 10 台/).waitFor();
+  await page.unroute("**/api/append_question");
+  assert.equal(submittedIds.length,2);
+  assert.equal(submittedIds[0],submittedIds[1]);
+  await append.getByText(/排在第 5 题/).waitFor();
+  await page.waitForFunction(() => document.querySelector("#append-question textarea").value === "");
+  assert.equal(await page.locator("#live-question option").count(),4);
+  assert.equal(await page.locator("#live-question").inputValue(),polls[1].id);
+  const updated = (await (await fetch(base+"/api/state")).json()).batch.polls;
+  assert.equal(updated[3].title,"临时加一站吗");
+  assert.equal(updated[3].deadline_at_ms,polls[0].deadline_at_ms);
+  assert.deepEqual(updated.map(p=>p.total),[2,1,0,0]);
+  await page.getByLabel("查看题目").selectOption(updated[3].id);
+  await page.locator("#live-title").getByText("临时加一站吗",{exact:true}).waitFor();
+  await page.screenshot({path:path.join(output,"append-live.png"),fullPage:true});
+  await page.getByLabel("查看题目").selectOption(polls[1].id);
   await page.locator("#edit-deadline summary").click();
   await page.locator("#deadline-form").getByLabel("截止方式").selectOption("manual");
   await page.locator("#save-deadline").click();
@@ -69,6 +112,19 @@ async function checkBatch(page) {
   assert((await (await fetch(base+"/api/state")).json()).batch.polls.every(p=>!("deadline_at_ms" in p)));
   await page.getByRole("button",{name:"整组截止收票"}).click();
   await page.waitForFunction(()=>document.getElementById("phase").textContent==="已截止");
+  await page.getByRole("link",{name:"本场统计已保存，查看统计"}).click();
+  const history = page.locator("#history");
+  const entry = history.locator("details").filter({has:page.locator("summary strong",{hasText:"集合地点"})});
+  await entry.getByText(/2 人参与 · 3 票/).waitFor();
+  await entry.getByRole("heading",{name:"2. 先去哪里（1 票）",exact:true}).waitFor();
+  await entry.getByRole("heading",{name:"3. 是否骑车（0 票）",exact:true}).waitFor();
+  await entry.getByRole("heading",{name:"4. 临时加一站吗（0 票）",exact:true}).waitFor();
+  const downloadPromise = page.waitForEvent("download");
+  await entry.getByRole("link",{name:"下载统计 CSV"}).click();
+  const csvFile = await downloadPromise;
+  assert.equal(csvFile.suggestedFilename(),`vote-${polls[0].id}.csv`);
+  const csvBody = fs.readFileSync(await csvFile.path(), "utf8");
+  assert(csvBody.includes("先去哪里,1,B,车站,1,100.0%"));
   await page.getByRole("button",{name:"公布整组结果"}).click();
   await page.waitForFunction(()=>document.getElementById("phase").textContent==="结果已公布");
   const shown = page.waitForResponse(r => r.url() === base+"/api/show_result" && r.request().method()==="POST");
@@ -76,6 +132,9 @@ async function checkBatch(page) {
   assert((await shown).ok());
   assert.equal((await (await fetch(base+"/api/state")).json()).batch.shown_result,polls[1].id);
   await page.reload();
+  await page.locator("#history summary").filter({hasText:"集合地点"}).first().click();
+  await page.locator("#history").getByRole("heading",{name:"1. 集合地点（2 票）"}).waitFor();
+  assert.equal(await page.locator("#history-list .history-entry").count(),3);
   await page.getByLabel("查看题目").selectOption(polls[2].id);
   await page.locator("#result-caption").getByText(/本题已收 0 票/).waitFor();
   await page.setViewportSize({width:390,height:844});
@@ -126,6 +185,62 @@ async function checkTimedPoll(page) {
   assert(await page.locator("#publish").isEnabled());
   await page.locator("#publish").click();
   await phase.getByText("结果已公布").waitFor();
+}
+async function checkVoteModes(page) {
+  const form = page.locator("#poll-form");
+  const cards = form.locator(".draft-question");
+  const first = cards.nth(0);
+  await first.getByLabel("投票题目").fill("活动地点");
+  await first.getByLabel("选项 A",{exact:true}).fill("公园");
+  await first.getByLabel("选项 B",{exact:true}).fill("学校");
+  await first.getByLabel("投票模式").selectOption("approval");
+  await first.getByLabel("投票模式").selectOption("single");
+  assert.equal(await first.getByLabel("选项 A",{exact:true}).inputValue(), "公园");
+  const add = form.getByRole("button",{name:"添加题目"});
+  await add.click();
+  const approval = cards.nth(1);
+  await approval.getByLabel("投票题目").fill("是否通过活动方案");
+  await approval.getByLabel("投票模式").selectOption("approval");
+  await add.click();
+  const rating = cards.nth(2);
+  await rating.getByLabel("投票题目").fill("给活动打几分");
+  await rating.getByLabel("投票模式").selectOption("rating");
+  await page.screenshot({path:path.join(output,"vote-modes-editor.png"),fullPage:true});
+  await form.getByRole("button",{name:"一次发起 3 题"}).click();
+  const append = page.locator("#append-form");
+  await append.getByLabel("追加题目").fill("哪个季节更冷");
+  await append.getByLabel("投票模式").selectOption("quiz");
+  await append.getByLabel("选项 A",{exact:true}).fill("冬天");
+  await append.getByLabel("选项 B",{exact:true}).fill("夏天");
+  await append.getByLabel("正确答案").selectOption({index:1});
+  await append.getByRole("button",{name:"追加并推送"}).click();
+  await page.getByRole("status").getByText(/新题已追加/).waitFor();
+  await page.waitForFunction(() => document.querySelector("#live-question").options.length === 4);
+  const {batch:{polls}} = await (await fetch(base+"/api/state")).json();
+  assert.deepEqual(polls.map(p=>p.mode),["single","approval","rating","quiz"]);
+  assert.deepEqual(polls[1].options,["赞成","反对","弃权"]);
+  assert.deepEqual(polls[2].options,["1 分","2 分","3 分","4 分","5 分"]);
+  assert.equal(polls[3].correct_choice,0);
+  const choices = [0,0,4,0];
+  for (const [index, question] of polls.entries()) {
+    clients[0].send(JSON.stringify({v:1,type:"vote",poll_id:question.id,choice:choices[index]}));
+    await page.waitForFunction(total => Number(document.querySelector("#votes").textContent) === total, index+1);
+  }
+  const result = page.locator("#live-result-summary");
+  await page.getByLabel("查看题目").selectOption(polls[1].id);
+  await result.getByText(/赞成率\s*100\.0%/).waitFor();
+  await page.getByLabel("查看题目").selectOption(polls[2].id);
+  await result.getByText(/平均\s*5\.00\s*分/).waitFor();
+  await page.getByLabel("查看题目").selectOption(polls[3].id);
+  await result.getByText(/答对\s*1\s*人/).waitFor();
+  await page.getByRole("button",{name:"整组截止收票"}).click();
+  await page.getByRole("link",{name:"本场统计已保存，查看统计"}).click();
+  const latest = page.locator("#history-list details").first();
+  await latest.getByRole("heading",{name:"4. 哪个季节更冷（1 票）",exact:true}).waitFor();
+  await latest.getByText(/答对\s*1\s*人/).waitFor();
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),"选择模式和查看统计时手机页面横向溢出");
+  await page.getByRole("button",{name:"公布整组结果"}).click();
+  await page.locator("#phase").getByText("结果已公布").waitFor();
 }
 async function checkPhoneSetup() {
   const phone = await browser.newPage({ viewport: { width: 390, height: 844 } });
@@ -238,7 +353,9 @@ async function run() {
     .locator("#live-title")
     .getByText("周末团建，你更想去哪里？", { exact: true })
     .waitFor();
-  assert(await page.getByRole("button", { name: "发起投票" }).isDisabled());
+  await page.getByRole("heading",{name:"向本场追加题目"}).waitFor();
+  assert(await page.locator("#start").isDisabled());
+  assert(await page.getByRole("button",{name:"追加并推送"}).isEnabled());
   for (let i = 0; i < 10; i++) {
     const ws = new WebSocket("ws://127.0.0.1:18765/ws");
     clients.push(ws);
@@ -327,6 +444,7 @@ async function run() {
   );
   await checkTimedPoll(page);
   await checkBatch(page);
+  await checkVoteModes(page);
   await checkPhoneSetup();
   assert.deepEqual(errors, []);
   fs.writeFileSync(
@@ -349,6 +467,9 @@ async function run() {
           "移动端无横向溢出",
           "定时发题、取消与更改截止时间、跨时区输入、刷新后自动截止与手动公布",
           "批量增删题目、整批校验、按人进度、逐题计票、整组截止和结果展示",
+          "收票中追加题目并推送、保留草稿和正在查看的题目、追加题进入本场历史",
+          "逐题切换四种投票模式，混合发题、追加测验、查看实时统计和归档",
+          "发题后十个在线连接收到推送，截止即保存逐题统计，刷新可重看并下载 CSV",
           "固件配网页选网、自动模式、更正入场码、多会场选择和成功提示（无线接口使用测试数据）",
         ],
       },
@@ -357,7 +478,7 @@ async function run() {
     ),
   );
   console.log(
-    "浏览器验收通过，覆盖十端计票、批量发题与结果展示、定时截止、跨时区输入及桌面和手机布局，控制台错误 0。",
+    "浏览器验收通过，覆盖在线推送、批量投票、定时截止、历史回看和 CSV 下载，以及桌面和手机布局。控制台错误 0。",
   );
 }
 run()

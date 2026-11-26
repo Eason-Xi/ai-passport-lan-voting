@@ -15,6 +15,7 @@
         ><span>共选<small>LAN VOTING</small></span></a
       >
       <div class="connection">
+        <a class="history-nav" href="#history">投票历史</a>
         <i id="dot"></i><span id="connection">连接主持服务中</span
         ><span class="local">本地运行</span>
       </div>
@@ -45,8 +46,8 @@
       <div class="workspace">
         <section class="panel editor">
           <div class="panel-heading">
-            <h2>新建投票</h2>
-            <span class="pill">单选 · 首票锁定</span>
+            <h2 id="editor-title">新建投票</h2>
+            <span class="pill">首票锁定</span>
           </div>
           <form id="poll-form">
             <div id="questions"></div>
@@ -64,6 +65,13 @@
               发起后，题目将同步到所有在线投票器。
             </p>
           </form>
+          <form id="append-form" hidden>
+            <p class="help" id="append-note"></p>
+            <div id="append-question"></div>
+            <button type="button" class="secondary" id="use-append-draft" hidden>将草稿用于当前场次</button>
+            <button type="submit" class="primary" id="append-submit">追加并推送</button>
+          </form>
+          <button type="button" class="text-button" id="editor-mode" hidden>准备下一场投票</button>
         </section>
         <section class="panel live">
           <div class="panel-heading">
@@ -91,7 +99,9 @@
                 </form>
               </details>
             </div>
+            <p id="live-result-summary" class="mode-result" hidden></p>
             <div id="results"></div>
+            <a id="current-report" href="#history" hidden>本场统计已保存，查看统计</a>
             <button id="show-result" class="secondary" type="button" hidden>在投票器上展示本题</button>
             <div class="actions">
               <button id="close" class="secondary" type="button">
@@ -117,6 +127,13 @@
         </div>
         <div id="device-list"></div>
       </section>
+      <section class="panel history" id="history" aria-labelledby="history-title">
+        <div class="panel-heading"><h2 id="history-title">投票历史</h2></div>
+        <p class="help" id="history-status" aria-live="polite">正在读取已保存的统计…</p>
+        <div id="history-list"></div>
+        <button type="button" class="secondary" id="history-more" hidden>查看更早的投票</button>
+        <button type="button" class="text-button" id="history-retry" hidden>重新加载统计</button>
+      </section>
       <footer>
         共选 · 局域网多人互动投票器<span>数据保存在这台电脑 · 无需互联网</span>
       </footer>
@@ -125,13 +142,33 @@
       <fieldset class="draft-question">
         <legend></legend>
         <button type="button" class="text-button remove-question">移除本题</button>
+        <div class="question-mode" hidden>
+          <label>投票模式
+            <select class="mode-select">
+              <option value="single">普通单选</option>
+              <option value="approval">赞成 / 反对 / 弃权</option>
+              <option value="rating">五分评分</option>
+              <option value="quiz">答题测验</option>
+            </select>
+          </label>
+          <p class="help mode-guide"></p>
+        </div>
         <label class="question-label">投票题目<span>0 / 60</span></label>
         <textarea maxlength="60" rows="2" required placeholder="例如：周末团建，你更想去哪里？"></textarea>
-        <div class="option-heading">
-          <label>投票选项 <small>2～6 项，每项最多 24 字</small></label>
-          <button type="button" class="text-button add-option">＋ 添加选项</button>
+        <div class="custom-options">
+          <div class="option-heading">
+            <label>投票选项 <small>2～6 项，每项最多 24 字</small></label>
+            <button type="button" class="text-button add-option">＋ 添加选项</button>
+          </div>
+          <div class="options"></div>
         </div>
-        <div class="options"></div>
+        <div class="fixed-options" hidden>
+          <h3>投票器上的选项</h3>
+          <ul></ul>
+        </div>
+        <label class="quiz-answer" hidden>正确答案
+          <select class="correct-choice"></select>
+        </label>
       </fieldset>
     </template>
     <template id="deadline-template">
