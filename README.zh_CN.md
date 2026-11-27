@@ -4,7 +4,7 @@
 
 一台电脑主持投票，默认可登记 10 台 AI Passport，设备上限可设为 1～200 台。每道题有 2～6 个单选项。同一设备在同一题中首次确认后锁票。主持人可实时查看统计，公布后每台投票器都会收到最终结果。现场运行只需要局域网。
 
-仓库包含 0.4.0 版投票器固件和电脑主持台。设备使用 ESP32-C3、8 MB Flash 和原板的三个按键。板级驱动沿用 [AI Passport](https://github.com/Eason-Xi/ai-passport)，保留原 MIT 许可证。项目最初的需求见[投票器 PRD 重建版](docs/LAN_Voting_PRD_v0.1_重建版.md)。
+仓库包含 0.4.1 版投票器固件和电脑主持台。设备使用 ESP32-C3、8 MB Flash 和原板的三个按键。板级驱动沿用 [AI Passport](https://github.com/Eason-Xi/ai-passport)，保留原 MIT 许可证。项目最初的需求见[投票器 PRD 重建版](docs/LAN_Voting_PRD_v0.1_重建版.md)。
 
 ## 下载与准备
 

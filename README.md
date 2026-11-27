@@ -4,7 +4,7 @@
 
 One computer hosts a poll for ten registered AI Passport voters by default. The host can set a limit from 1 to 200. Each question has two to six options. A device locks its first confirmed choice for that question. The host sees live statistics and publishes the final result to all voters. The session runs on the local network.
 
-This repository contains the 0.4.0 voter firmware and host console. The voter uses an ESP32-C3, 8 MB of flash and three buttons. Board support comes from [AI Passport](https://github.com/Eason-Xi/ai-passport) under its original MIT license. The [project brief](docs/LAN_Voting_PRD_v0.1_重建版.md) is available in Simplified Chinese.
+This repository contains the 0.4.1 voter firmware and host console. The voter uses an ESP32-C3, 8 MB of flash and three buttons. Board support comes from [AI Passport](https://github.com/Eason-Xi/ai-passport) under its original MIT license. The [project brief](docs/LAN_Voting_PRD_v0.1_重建版.md) is available in Simplified Chinese.
 
 ## Download and prepare
 

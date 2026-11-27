@@ -593,7 +593,7 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([q["counts"] for q in report["questions"]], [[1,1], [0,1], [0,0]])
         out = Path(__file__).resolve().parents[1] / "build" / "vote-append-wire.jsonl"
         out.parent.mkdir(exist_ok=True)
-        out.write_text("".join(json.dumps(p, ensure_ascii=False) + "\n" for p in wire))
+        out.write_text("".join(json.dumps(p, ensure_ascii=False) + "\n" for p in wire), encoding="utf-8")
 
     async def test_batch_independent_progress_reconnect_and_results(self):
         fast, _ = await self.connect(0)
@@ -665,7 +665,7 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
         wire.append(restored)
         out = Path(__file__).resolve().parents[1] / "build" / "vote-batch-wire.jsonl"
         out.parent.mkdir(exist_ok=True)
-        out.write_text("".join(json.dumps(p,ensure_ascii=False,separators=(",",":"))+"\n" for p in wire))
+        out.write_text("".join(json.dumps(p,ensure_ascii=False,separators=(",",":"))+"\n" for p in wire), encoding="utf-8")
 
     async def test_ten_voters_complete_the_same_batch(self):
         clients = [(await self.connect(i))[0] for i in range(10)]
@@ -718,7 +718,7 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([q["total"] for q in report["questions"]], [MAX_DEVICE_LIMIT] * len(polls))
         out = Path(__file__).resolve().parents[1] / "build" / "vote-capacity-wire.jsonl"
         out.parent.mkdir(exist_ok=True)
-        out.write_text(json.dumps(results[0], ensure_ascii=False) + "\n")
+        out.write_text(json.dumps(results[0], ensure_ascii=False) + "\n", encoding="utf-8")
 
     async def test_idle_expiry_push_and_offline_voter(self):
         ws, _ = await self.connect(0)
@@ -744,7 +744,7 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
         out = Path(__file__).resolve().parents[1] / "build" / "vote-timed-wire.jsonl"
         out.parent.mkdir(exist_ok=True)
         packets = [dict(v=1, type="state", poll=p) for p in (opened, closed)] + [restored, result]
-        out.write_text("".join(json.dumps(d, ensure_ascii=False) + "\n" for d in packets))
+        out.write_text("".join(json.dumps(d, ensure_ascii=False) + "\n" for d in packets), encoding="utf-8")
 
     async def test_rearm_cancel_and_restart_without_clients(self):
         await self.action("create", dict(title="延时题", options=["是", "否"], duration_seconds=60))
@@ -813,7 +813,7 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restarted["poll"]["counts"], [2,2,2,2,1,1]); transcript.append(restarted)
         out = Path(__file__).resolve().parents[1] / "build" / "vote-wire.jsonl"
         out.parent.mkdir(exist_ok=True)
-        out.write_text("".join(json.dumps(d, ensure_ascii=False, separators=(",", ":")) + "\n" for d in transcript))
+        out.write_text("".join(json.dumps(d, ensure_ascii=False, separators=(",", ":")) + "\n" for d in transcript), encoding="utf-8")
 
     async def test_authentication_and_admin_boundary(self):
         _, data = await self.connect(0, "invalid")
