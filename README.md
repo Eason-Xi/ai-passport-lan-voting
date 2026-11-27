@@ -4,13 +4,13 @@
 
 One computer hosts a poll for ten registered AI Passport voters by default. The host can set a limit from 1 to 200. Each question has two to six options. A device locks its first confirmed choice for that question. The host sees live statistics and publishes the final result to all voters. The session runs on the local network.
 
-This repository contains the 0.5.0 voter firmware and host console. The voter uses an ESP32-C3, 8 MB of flash and three buttons. Board support comes from [AI Passport](https://github.com/Eason-Xi/ai-passport) under its original MIT license. The [project brief](docs/LAN_Voting_PRD_v0.1_重建版.md) is available in Simplified Chinese.
+This repository contains the 0.5.0 voter firmware and the 0.5.1 host console. The voter uses an ESP32-C3, 8 MB of flash and three buttons. Board support comes from [AI Passport](https://github.com/Eason-Xi/ai-passport) under its original MIT license. The [project brief](docs/LAN_Voting_PRD_v0.1_重建版.md) is available in Simplified Chinese.
 
 ## Download and prepare
 
 You need a host computer, at least one **FoloToy AI Passport (ESP32-C3, 8 MB flash)** and a local network with 2.4 GHz Wi-Fi that lets clients reach each other. The host computer can use Ethernet on the same router. A phone is used for setting up each voter.
 
-Open [GitHub Releases](https://github.com/Eason-Xi/ai-passport-lan-voting/releases/latest) and choose the files you need from **Assets**.
+Download the host console from the [latest GitHub Release](https://github.com/Eason-Xi/ai-passport-lan-voting/releases/latest) and the voter firmware from [Release v0.5.0](https://github.com/Eason-Xi/ai-passport-lan-voting/releases/tag/v0.5.0). The files are listed under **Assets**.
 
 | Use | Download | How to use it |
 | --- | --- | --- |

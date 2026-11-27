@@ -4,13 +4,13 @@
 
 一台电脑主持投票，默认可登记 10 台 AI Passport，设备上限可设为 1～200 台。每道题有 2～6 个单选项。同一设备在同一题中首次确认后锁票。主持人可实时查看统计，公布后每台投票器都会收到最终结果。现场运行只需要局域网。
 
-仓库包含 0.5.0 版投票器固件和电脑主持台。设备使用 ESP32-C3、8 MB Flash 和原板的三个按键。板级驱动沿用 [AI Passport](https://github.com/Eason-Xi/ai-passport)，保留原 MIT 许可证。项目最初的需求见[投票器 PRD 重建版](docs/LAN_Voting_PRD_v0.1_重建版.md)。
+仓库包含 0.5.0 版投票器固件和 0.5.1 版电脑主持台。设备使用 ESP32-C3、8 MB Flash 和原板的三个按键。板级驱动沿用 [AI Passport](https://github.com/Eason-Xi/ai-passport)，保留原 MIT 许可证。项目最初的需求见[投票器 PRD 重建版](docs/LAN_Voting_PRD_v0.1_重建版.md)。
 
 ## 下载与准备
 
 准备一台主持电脑、至少一台 **FoloToy AI Passport（ESP32-C3、8 MB Flash）**，以及允许设备互访的 2.4 GHz Wi-Fi。电脑也可以用网线接入同一个路由器。手机只在首次配网时使用。
 
-先打开 [GitHub Releases](https://github.com/Eason-Xi/ai-passport-lan-voting/releases/latest)，从 **Assets** 里按用途下载文件。
+电脑主持台请从 [GitHub 最新发布](https://github.com/Eason-Xi/ai-passport-lan-voting/releases/latest) 下载，投票器固件请从 [v0.5.0 发布页](https://github.com/Eason-Xi/ai-passport-lan-voting/releases/tag/v0.5.0) 下载。文件位于各发布页的 **Assets**。
 
 | 用途 | 下载文件 | 如何使用 |
 | --- | --- | --- |
