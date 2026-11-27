@@ -103,8 +103,8 @@ if IS_MAC:
         info_plist={
             "CFBundleDisplayName": APP_NAME,
             "CFBundleName": APP_NAME,
-            "CFBundleShortVersionString": "0.4.1",
-            "CFBundleVersion": "0.4.1",
+            "CFBundleShortVersionString": "0.5.0",
+            "CFBundleVersion": "0.5.0",
             "NSHighResolutionCapable": True,
             "NSLocalNetworkUsageDescription": "共选主持台需要访问局域网，用于自动发现并连接现场的投票器设备。",
             "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},

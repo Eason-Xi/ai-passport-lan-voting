@@ -4,7 +4,7 @@
 
 One computer hosts a poll for ten registered AI Passport voters by default. The host can set a limit from 1 to 200. Each question has two to six options. A device locks its first confirmed choice for that question. The host sees live statistics and publishes the final result to all voters. The session runs on the local network.
 
-This repository contains the 0.4.1 voter firmware and host console. The voter uses an ESP32-C3, 8 MB of flash and three buttons. Board support comes from [AI Passport](https://github.com/Eason-Xi/ai-passport) under its original MIT license. The [project brief](docs/LAN_Voting_PRD_v0.1_重建版.md) is available in Simplified Chinese.
+This repository contains the 0.5.0 voter firmware and host console. The voter uses an ESP32-C3, 8 MB of flash and three buttons. Board support comes from [AI Passport](https://github.com/Eason-Xi/ai-passport) under its original MIT license. The [project brief](docs/LAN_Voting_PRD_v0.1_重建版.md) is available in Simplified Chinese.
 
 ## Download and prepare
 
@@ -30,7 +30,7 @@ Opening the desktop app starts the host service. You can also visit the [local c
 4. Enter a question and choose its voting mode. Choose manual closing (the default), a duration of 30 seconds, 1 minute or 5 minutes, or a date and time in Beijing, then start voting. On each voter, UP/DOWN selects an option, OK opens confirmation, and the next OK submits. Either direction cancels confirmation. The success screen means the computer recorded the vote.
 5. Closing voting stops new submissions while keeping results private. Publishing from either the open or closed phase sends the final counts and percentages to voters. Use UP/DOWN on the results page to scroll long option labels. Start a new question after publishing the current result.
 
-The computer can use Ethernet or Wi-Fi. Automatic discovery uses UDP 48765 on the same IPv4 subnet. Voting uses the host TCP port (8765 by default). Discovery carries a random challenge, a public host identifier and a port. A paired voter can find the same host after its IP address or port changes. Hosts using different databases have different identities. Hold OK and confirm reconfiguration to change hosts.
+The computer can use Ethernet or Wi-Fi. Automatic discovery uses UDP 48765 on the same IPv4 subnet. Voting uses the host TCP port (8765 by default). Discovery carries a random challenge, a public host identifier and a port. A paired voter can find the same host after its IP address or port changes. Hosts using different databases have different identities. To switch hosts or enrollment codes without reconnecting Wi-Fi, hold OK on the voter and choose one-tap join (while the host's 60-second open-join window is active) or enter the 6-digit code directly with the three buttons; the phone setup portal also lets you keep the current Wi-Fi and update only the code.
 
 If broadcasts are filtered or the host runs older software, expand manual host settings and enter a private IPv4 address such as `192.168.1.20` or `192.168.1.20:9876`. The console lists the full addresses under participating devices. Use a network that allows clients to communicate. Rejoin the device hotspot if the phone disconnects during a Wi-Fi channel change.
 
