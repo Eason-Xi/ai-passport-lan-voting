@@ -26,9 +26,19 @@ The console displays the scheduled time and a countdown. Version 0.3 voters show
 
 During host sleep or downtime, submissions cannot be recorded. Restarting with the same database restores future deadlines and closes overdue polls immediately. Questions migrated from earlier versions keep manual closing. Older voters receive the regular closed snapshot from the updated host. Install the new voter firmware to see the countdown on its display.
 
-## Install the host on another computer
+## Desktop client and local web console
 
-Clone this repository, install Python 3.12, and run the following from the repository root. Download dependencies once before using the system offline.
+### Option 1: Standalone desktop client (no Python required on target machines)
+
+[host/desktop.py](host/desktop.py) and [desktop/gongxuan.spec](desktop/gongxuan.spec) package the same host service and upgraded console UI (with full-screen presentation mode via `F`, live font-coverage check, option presets, poll history reuse, device aliases, and PNG result export) into native desktop apps:
+
+- **macOS**: Run `bash desktop/build_mac.sh` to build `dist/共选主持台.app` and `dist/共选主持台-macOS-<arch>.zip`. Data is stored in `~/Library/Application Support/GongxuanVoting/votes.sqlite3`.
+- **Windows**: Run [desktop/build_windows.bat](desktop/build_windows.bat) on Windows to build a single-file `dist\共选主持台.exe` powered by Edge WebView2. Data is stored in `%APPDATA%\GongxuanVoting\votes.sqlite3`.
+- **GitHub Actions**: Trigger [build-desktop.yml](.github/workflows/build-desktop.yml) manually or via a `v*` tag to build both macOS and Windows binaries.
+
+### Option 2: Run from source
+
+Clone this repository and install Python 3.12. Double-click [host/start.command](host/start.command) on macOS or [host/start.bat](host/start.bat) on Windows, or run from the repository root:
 
 ```sh
 python3 -m venv .venv

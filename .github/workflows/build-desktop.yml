@@ -1,0 +1,52 @@
+name: Build Desktop Clients
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install desktop dependencies
+        run: |
+          python3 -m venv .venv-desktop
+          .venv-desktop/bin/python -m pip install -r desktop/requirements-desktop.txt
+      - name: Run server tests
+        run: .venv-desktop/bin/python tests/test_voting_server.py
+      - name: Build macOS app
+        run: bash desktop/build_mac.sh
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gongxuan-desktop-macos-arm64
+          path: dist/共选主持台-macOS-*.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install desktop dependencies
+        run: |
+          python -m venv .venv-desktop
+          .venv-desktop\Scripts\python.exe -m pip install -r desktop\requirements-desktop.txt
+      - name: Run server tests
+        run: .venv-desktop\Scripts\python.exe tests\test_voting_server.py
+      - name: Generate icon and build Windows exe
+        run: |
+          .venv-desktop\Scripts\python.exe desktop\gen_icons.py
+          .venv-desktop\Scripts\pyinstaller.exe --clean --noconfirm --distpath dist --workpath build\pyinstaller desktop\gongxuan.spec
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gongxuan-desktop-windows-x64
+          path: dist\共选主持台.exe

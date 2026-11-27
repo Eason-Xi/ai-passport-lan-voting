@@ -1,8 +1,10 @@
 /build/
+/dist/
 /managed_components/
 /sdkconfig
 /sdkconfig.old
 /.venv/
+/.venv-desktop/
 /host/data/
 __pycache__/
 *.py[cod]

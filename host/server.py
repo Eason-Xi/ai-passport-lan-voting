@@ -10,6 +10,7 @@ import re
 import secrets
 import socket
 import sqlite3
+import sys
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -17,8 +18,19 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 
 ROOT = Path(__file__).resolve().parents[1]
-STATIC = ROOT / "host" / "static"
+
+
+def resolve_static_dir() -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        bundled = Path(sys._MEIPASS) / "host" / "static"
+        if bundled.is_dir():
+            return bundled
+    return ROOT / "host" / "static"
+
+
+STATIC = resolve_static_dir()
 MAX_DEVICES = 10
+MAX_ALIAS_LENGTH = 20
 MAX_MESSAGE = 4096
 MAX_DEADLINE_MS = 253402300799999  # 公历 9999 年末的 Unix 毫秒数。
 DISCOVERY_PORT = 48765
@@ -180,6 +192,81 @@ class Store:
             if type(choice) is not int or not 0 <= choice < len(json.loads(poll["options"])):
                 raise ValueError("选项编号无效")
             self.db.execute("INSERT INTO votes VALUES (?, ?, ?, ?)", (poll_id, device, choice, now / 1000))
+
+    def aliases(self) -> dict[str, str]:
+        row = self.db.execute("SELECT value FROM settings WHERE key='device_aliases'").fetchone()
+        if not row:
+            return {}
+        try:
+            data = json.loads(row["value"])
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+
+    def set_alias(self, device: object, alias: object) -> str:
+        if not isinstance(device, str) or not re.fullmatch(r"[0-9a-f]{12}", device):
+            raise ValueError("设备编号无效")
+        if not isinstance(alias, str):
+            raise ValueError("设备备注必须是文字")
+        cleaned = alias.strip()
+        if len(cleaned) > MAX_ALIAS_LENGTH:
+            raise ValueError(f"设备备注最多 {MAX_ALIAS_LENGTH} 个字符")
+        if any(ord(c) < 32 or ord(c) == 127 for c in cleaned):
+            raise ValueError("设备备注不能包含换行或控制字符")
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            if not self.db.execute("SELECT 1 FROM devices WHERE id=?", (device,)).fetchone():
+                raise ValueError("该设备尚未登记")
+            mapping = self.aliases()
+            if cleaned:
+                mapping[device] = cleaned
+            else:
+                mapping.pop(device, None)
+            self.db.execute(
+                "INSERT INTO settings VALUES ('device_aliases', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (json.dumps(mapping, ensure_ascii=False),),
+            )
+        return cleaned
+
+    def history(self, limit: int = 50) -> list[dict]:
+        self.current()
+        rows = list(self.db.execute(
+            "SELECT id, title, options, phase, created, deadline_at_ms FROM polls ORDER BY rowid DESC LIMIT ?",
+            (limit,),
+        ))
+        if not rows:
+            return []
+        ids = [r["id"] for r in rows]
+        placeholders = ",".join("?" for _ in ids)
+        vote_rows = self.db.execute(
+            f"SELECT poll_id, choice, COUNT(*) AS cnt FROM votes WHERE poll_id IN ({placeholders}) "
+            "GROUP BY poll_id, choice",
+            ids,
+        )
+        tally: dict[str, dict[int, int]] = {}
+        for vr in vote_rows:
+            tally.setdefault(vr["poll_id"], {})[vr["choice"]] = vr["cnt"]
+        result = []
+        for r in rows:
+            options = json.loads(r["options"])
+            by_choice = tally.get(r["id"], {})
+            counts = [by_choice.get(i, 0) for i in range(len(options))]
+            item = dict(
+                id=r["id"],
+                title=r["title"],
+                options=options,
+                phase=r["phase"],
+                created_ms=int(r["created"] * 1000),
+                counts=counts,
+                total=sum(counts),
+            )
+            if r["deadline_at_ms"] is not None:
+                item["deadline_at_ms"] = r["deadline_at_ms"]
+            result.append(item)
+        return result
 
     def snapshot(self, device: str | None = None):
         now = clock_ms()
@@ -344,14 +431,22 @@ class VotingService:
     async def admin_state(self, request):
         self.admin_guard(request)
         state = self.store.snapshot()
+        history_count = self.store.db.execute("SELECT COUNT(*) FROM polls").fetchone()[0]
         state.update(join_code=self.store.join_code, nonce=self.admin_nonce, max_devices=MAX_DEVICES,
                      addresses=self.addresses, port=self.port, host_id=self.store.host_id,
-                     discovery_available=self.discovery is not None)
+                     discovery_available=self.discovery is not None, history_count=history_count)
         current_id = state["poll"]["id"] if state["poll"] else ""
         voted = {r[0] for r in self.store.db.execute("SELECT device_id FROM votes WHERE poll_id=?", (current_id,))}
-        state["devices"] = [dict(id=r["id"], online=r["id"] in self.clients, voted=r["id"] in voted)
-                            for r in self.store.db.execute("SELECT * FROM devices ORDER BY id")]
+        aliases = self.store.aliases()
+        state["devices"] = [
+            dict(id=r["id"], online=r["id"] in self.clients, voted=r["id"] in voted, alias=aliases.get(r["id"], ""))
+            for r in self.store.db.execute("SELECT * FROM devices ORDER BY id")
+        ]
         return web.json_response(state)
+
+    async def admin_history(self, request):
+        self.admin_guard(request)
+        return web.json_response({"polls": self.store.history()})
 
     async def admin_action(self, request):
         self.admin_guard(request)
@@ -374,11 +469,14 @@ class VotingService:
                     raise ValueError("请先断开该设备")
                 with self.store.db:
                     self.store.db.execute("DELETE FROM devices WHERE id=?", (device,))
+            elif action == "alias":
+                self.store.set_alias(data.get("device_id"), data.get("alias", ""))
             else:
                 raise ValueError("操作无效")
             if action in ("create", "deadline", "close", "publish"):
                 self.deadline_changed.set()
-            await self.broadcast()
+            if action != "alias":
+                await self.broadcast()
             return web.json_response({"ok": True})
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
@@ -391,7 +489,7 @@ class VotingService:
         if name not in {"index.html", "app.js", "style.css", "font-coverage.json", "favicon.ico"}:
             raise web.HTTPNotFound()
         return web.FileResponse(STATIC / name, headers={"Cache-Control": "no-store",
-            "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'"})
+            "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'none'; frame-ancestors 'none'"})
 
     async def cleanup(self, app):
         if self.deadline_task is not None:
@@ -419,6 +517,7 @@ class VotingService:
         app = web.Application(client_max_size=MAX_MESSAGE)
         app.router.add_get("/ws", self.ws_device)
         app.router.add_get("/api/state", self.admin_state)
+        app.router.add_get("/api/history", self.admin_history)
         app.router.add_post("/api/{action}", self.admin_action)
         app.router.add_get("/", self.static)
         app.router.add_get("/{name}", self.static)
@@ -428,13 +527,27 @@ class VotingService:
 
 
 def lan_addresses(port):
-    # 不向互联网发包；主机名解析提供候选地址，也允许用户手动查看网卡地址。
+    # 不向互联网发包；结合主机名解析与内核私有路由探测获取候选局域网地址。
+    found: set[str] = set()
     try:
-        addresses = sorted({item[4][0] for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
-                            if not ipaddress.ip_address(item[4][0]).is_loopback})
+        for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = ipaddress.IPv4Address(item[4][0])
+            if not ip.is_loopback and not ip.is_link_local:
+                found.add(str(ip))
     except socket.gaierror:
-        addresses = []
-    return [f"ws://{ip}:{port}/ws" for ip in addresses]
+        pass
+    for probe in ("10.255.255.255", "192.168.0.1", "172.16.0.1"):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect((probe, 1))
+            ip = ipaddress.IPv4Address(sock.getsockname()[0])
+            if not ip.is_loopback and not ip.is_link_local:
+                found.add(str(ip))
+        except OSError:
+            pass
+        finally:
+            sock.close()
+    return [f"ws://{ip}:{port}/ws" for ip in sorted(found)]
 
 
 def main():

@@ -26,9 +26,19 @@
 
 关闭主持网页不影响截止。电脑休眠或服务停止期间不能接收新票。使用原数据库恢复后，已到期的题目直接进入截止阶段，未来的截止时间继续生效。旧数据库中的已有题目沿用手动截止；原有投票器连接新版主持台也会正常收到截止通知。设备端显示倒计时需要 0.3 固件。
 
-## 主持软件的首次安装
+## 桌面客户端与网页主持台
 
-克隆本仓库并安装 Python 3.12，然后在项目根目录运行以下命令。安装依赖需要联网，之后可离线使用。
+### 方式一：双击即用的原生桌面客户端（免装 Python）
+
+项目内置跨平台原生桌面客户端入口 [host/desktop.py](host/desktop.py) 与打包配置 [desktop/gongxuan.spec](desktop/gongxuan.spec)，复用同一套主持服务与前端界面，支持现场大屏投屏模式（快捷键 `F`）、实时字库校验、快捷选项模板、历史投票回顾与复用、设备备注名及高清 PNG 结果图导出。
+
+- **macOS 打包**：运行 `bash desktop/build_mac.sh`，生成可直接双击打开的 `dist/共选主持台.app`（及便携压缩包 `dist/共选主持台-macOS-<arch>.zip`）。数据默认保存在 `~/Library/Application Support/GongxuanVoting/votes.sqlite3`。
+- **Windows 打包**：在 Windows 电脑双击或运行 [desktop/build_windows.bat](desktop/build_windows.bat)，生成免安装单文件 `dist\共选主持台.exe`（基于系统 Edge WebView2，无黑框控制台）。数据默认保存在 `%APPDATA%\GongxuanVoting\votes.sqlite3`。
+- **CI 自动构建**：推送 `v*` 标签或在 GitHub Actions 手动触发 [build-desktop.yml](.github/workflows/build-desktop.yml)，可同时产出 macOS 与 Windows 双端成品。
+
+### 方式二：从源码直接运行
+
+克隆本仓库并安装 Python 3.12，macOS 可直接双击 [host/start.command](host/start.command)，Windows 可直接双击 [host/start.bat](host/start.bat)（首次运行会自动建环境并打开页面）。也可在项目根目录手动执行：
 
 ```sh
 python3 -m venv .venv

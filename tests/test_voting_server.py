@@ -289,9 +289,41 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 403)
         async with self.session.get(self.base + "/api/state", headers={"Host":"untrusted.example"}) as response:
             self.assertEqual(response.status, 403)
+        async with self.session.get(self.base + "/api/history", headers={"Host":"untrusted.example"}) as response:
+            self.assertEqual(response.status, 403)
         async with self.session.get(self.base + "/") as response:
             self.assertEqual(response.status, 200)
             self.assertIn("共选", await response.text())
+
+    async def test_history_and_device_alias(self):
+        ws0, _ = await self.connect(0)
+        await self.action("create", dict(title="第一题", options=["赞成", "反对"]))
+        p1 = self.service.store.current()["id"]
+        await ws0.send_json(dict(v=1, type="vote", poll_id=p1, choice=0))
+        await self.receive_until(ws0, lambda d: d["poll"]["my_choice"] == 0)
+        await self.action("publish", dict(poll_id=p1))
+        await self.action("create", dict(title="第二题", options=["甲", "乙", "丙"]))
+        await self.action("alias", dict(device_id="aabbcc000000", alias="1号评委"))
+        async with self.session.get(self.base + "/api/state") as response:
+            state = await response.json()
+            self.assertEqual(state["history_count"], 2)
+            self.assertEqual(state["devices"][0]["alias"], "1号评委")
+        await self.action("alias", dict(device_id="aabbcc000000", alias="   "))
+        async with self.session.get(self.base + "/api/state") as response:
+            state = await response.json()
+            self.assertEqual(state["devices"][0]["alias"], "")
+        async with self.session.post(
+            self.base + "/api/alias",
+            json=dict(device_id="aabbcc000000", alias="超长备注名" * 6),
+            headers={"X-Host-Nonce": self.service.admin_nonce},
+        ) as response:
+            self.assertEqual(response.status, 400)
+        async with self.session.get(self.base + "/api/history") as response:
+            self.assertEqual(response.status, 200)
+            history = (await response.json())["polls"]
+            self.assertEqual([item["title"] for item in history], ["第二题", "第一题"])
+            self.assertEqual(history[1]["counts"], [1, 0])
+            self.assertEqual(history[1]["total"], 1)
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)
