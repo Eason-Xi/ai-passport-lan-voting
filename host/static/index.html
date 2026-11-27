@@ -92,6 +92,15 @@
             </svg>
             <span>大屏投屏</span>
           </a>
+          <button
+            type="button"
+            class="icon-btn cloud-only"
+            id="btn-logout"
+            title="退出主持台登录"
+            hidden
+          >
+            <span>退出</span>
+          </button>
         </div>
       </div>
     </header>
@@ -113,6 +122,15 @@
               >
                 <i class="open-join-dot" aria-hidden="true"></i>
                 <span id="open-join-text">一键入场</span>
+              </button>
+              <button
+                type="button"
+                class="copy-chip"
+                id="rotate-code-btn"
+                title="生成新的 6 位入场码"
+                hidden
+              >
+                <span>换码</span>
               </button>
               <button type="button" class="copy-chip" id="copy-code">
                 <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -174,7 +192,7 @@
       </section>
 
       <div class="workspace">
-        <section class="panel editor">
+        <section class="panel editor" id="panel-editor">
           <div class="panel-heading">
             <div>
               <h2 id="editor-title">新建投票</h2>
@@ -223,7 +241,7 @@
           </div>
         </section>
 
-        <section class="panel live">
+        <section class="panel live" id="panel-live">
           <div class="panel-heading">
             <div>
               <h2>实时计票</h2>
@@ -342,7 +360,7 @@
       </div>
 
       <div class="dashboard-lower">
-        <section class="panel devices">
+        <section class="panel devices" id="panel-devices">
           <div class="panel-heading">
             <div>
               <h2>参与设备</h2>
@@ -358,13 +376,14 @@
                   <i class="discovery-dot" aria-hidden="true"></i>
                   <span id="discovery-status">正在检查自动发现…</span>
                 </span>
-                <p>手机扫投票器屏幕二维码，选择 2.4 GHz Wi-Fi 并输入入场码。</p>
+                <p id="network-guide">手机扫投票器屏幕二维码，选择 2.4 GHz Wi-Fi 并输入入场码。</p>
               </div>
-              <details class="manual-net">
-                <summary>手动连接或使用旧版投票器</summary>
+              <details class="manual-net" id="manual-net-box">
+                <summary id="manual-net-summary">手动连接或使用旧版投票器</summary>
                 <div class="address-box">
                   <code id="server-address">正在读取本机局域网地址…</code>
                   <button type="button" class="mini-tool" id="copy-address">复制地址</button>
+                  <button type="button" class="mini-tool" id="copy-stage-link" hidden>复制大屏只读链接</button>
                 </div>
               </details>
             </div>
@@ -401,10 +420,45 @@
       </div>
 
       <footer>
-        <span>共选 · 局域网多人互动投票器</span>
-        <span>数据保存在本机 · 无需互联网 · 按 F 进入大屏模式</span>
+        <span id="footer-brand">共选 · 局域网多人互动投票器</span>
+        <span id="footer-hint">数据保存在本机 · 无需互联网 · 按 F 进入大屏模式</span>
       </footer>
     </main>
+
+    <!-- 手机端底部毛玻璃快捷导航栏（仅 <= 720px 显示） -->
+    <nav id="mobile-nav" class="mobile-nav" aria-label="移动端快速导航">
+      <button type="button" class="mobile-nav-btn active" data-target="panel-editor">出题</button>
+      <button type="button" class="mobile-nav-btn" data-target="panel-live">
+        计票<em id="mobile-live-dot" class="mobile-nav-dot" hidden></em>
+      </button>
+      <button type="button" class="mobile-nav-btn" data-target="panel-devices">
+        设备<em id="mobile-online-chip" class="mobile-nav-chip">0</em>
+      </button>
+      <button type="button" class="mobile-nav-btn" data-target="history">历史</button>
+    </nav>
+
+    <!-- 云端主持台登录遮罩（仅启用云端鉴权且未登录时显示） -->
+    <div id="cloud-login" class="cloud-login" role="dialog" aria-modal="true" aria-labelledby="cloud-login-title" hidden>
+      <form id="cloud-login-form" class="cloud-login-card">
+        <div class="cloud-login-brand">
+          <span class="mark" aria-hidden="true">共</span>
+          <div>
+            <h2 id="cloud-login-title">共选 · 云端主持台</h2>
+            <p id="cloud-login-sub">请输入管理员密码以使用手机或浏览器控场</p>
+          </div>
+        </div>
+        <label for="cloud-login-password">管理员密码</label>
+        <input
+          id="cloud-login-password"
+          type="password"
+          autocomplete="current-password"
+          required
+          placeholder="输入部署时设置的 ADMIN_PASSWORD"
+        />
+        <p id="cloud-login-error" class="help cloud-login-error" role="status" hidden></p>
+        <button type="submit" class="primary full-btn" id="cloud-login-submit">进入主持台</button>
+      </form>
+    </div>
 
     <!-- 现场大屏 / 投屏模式 -->
     <div

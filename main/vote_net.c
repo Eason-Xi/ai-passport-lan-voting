@@ -5,6 +5,7 @@
 #include "vote_portal.h"
 #include "vote_wifi_list.h"
 #include "cJSON.h"
+#include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
@@ -250,7 +251,7 @@ static esp_err_t setup_status(httpd_req_t *req)
 {
     if (!portal_host(req)) return redirect_portal(req, HTTPD_404_NOT_FOUND);
     int status = atomic_load(&s_setup_status);
-    char json[640];
+    char json[896];
     int used = snprintf(json, sizeof(json), "{\"status\":%d,\"message\":\"%s\",\"busy\":%s,\"hosts\":[",
                         status, SETUP_TEXT[status], setup_busy(status) ? "true" : "false");
     if (status == SETUP_PICK) {
@@ -258,16 +259,24 @@ static esp_err_t setup_status(httpd_req_t *req)
         portENTER_CRITICAL(&s_choice_lock);
         choices = s_choices;
         portEXIT_CRITICAL(&s_choice_lock);
-        for (unsigned i = 0; i < choices.count; i++)
-            used += snprintf(json + used, sizeof(json) - used, "%s\"%s\"", i ? "," : "", choices.ids[i]);
+        for (unsigned i = 0; i < choices.count && used < (int)sizeof(json) - 32; i++)
+            used += snprintf(json + used, sizeof(json) - (size_t)used, "%s\"%s\"", i ? "," : "", choices.ids[i]);
     }
-    used += snprintf(json + used, sizeof(json) - used, "]");
-    if (s_has_saved && vote_ssid_displayable(s_saved.ssid)) {
+    if (used < (int)sizeof(json) - 2)
+        used += snprintf(json + used, sizeof(json) - (size_t)used, "]");
+    if (s_has_saved && vote_ssid_displayable(s_saved.ssid) && used < (int)sizeof(json) - 96) {
         char escaped[72];
         append_json_escaped(escaped, sizeof(escaped), s_saved.ssid);
-        used += snprintf(json + used, sizeof(json) - used, ",\"saved_ssid\":\"%s\"", escaped);
+        used += snprintf(json + used, sizeof(json) - (size_t)used, ",\"saved_ssid\":\"%s\"", escaped);
     }
-    snprintf(json + used, sizeof(json) - used, "}");
+    if (s_has_saved && (!strncmp(s_saved.server, "wss://", 6) || !strncmp(s_saved.server, "ws://", 5)) &&
+        used < (int)sizeof(json) - 144) {
+        char escaped_srv[120];
+        append_json_escaped(escaped_srv, sizeof(escaped_srv), s_saved.server);
+        used += snprintf(json + used, sizeof(json) - (size_t)used, ",\"saved_server\":\"%s\"", escaped_srv);
+    }
+    if (used < (int)sizeof(json) - 1)
+        snprintf(json + used, sizeof(json) - (size_t)used, "}");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_sendstr(req, json);
@@ -509,10 +518,18 @@ static bool start_ws(const char *uri)
 {
     struct ifreq name = {0};
     if (esp_netif_get_netif_impl_name(s_sta_netif, name.ifr_name) != ESP_OK) return false;
+    const bool is_wss = strncmp(uri, "wss://", 6) == 0;
     const esp_websocket_client_config_t cfg = {
-        .uri = uri, .if_name = &name, .task_stack = 4096, .buffer_size = 768,
-        .reconnect_timeout_ms = 3000, .network_timeout_ms = 3000,
-        .ping_interval_sec = 10, .pingpong_timeout_sec = 10, .enable_close_reconnect = true,
+        .uri = uri,
+        .if_name = &name,
+        .task_stack = is_wss ? 6144 : 4096,
+        .buffer_size = 768,
+        .reconnect_timeout_ms = 3000,
+        .network_timeout_ms = is_wss ? 10000 : 3000,
+        .ping_interval_sec = is_wss ? 15 : 10,
+        .pingpong_timeout_sec = is_wss ? 15 : 10,
+        .enable_close_reconnect = true,
+        .crt_bundle_attach = is_wss ? esp_crt_bundle_attach : NULL,
     };
     s_ws = esp_websocket_client_init(&cfg);
     if (!s_ws || esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, websocket_event, NULL) != ESP_OK ||
@@ -655,8 +672,11 @@ static void setup_tick(vote_view_t *view, int64_t now, EventBits_t bits)
         wifi_ap_record_t ap;
         if ((bits & WIFI_READY) && esp_wifi_sta_get_ap_info(&ap) == ESP_OK &&
             !strncmp((const char *)ap.ssid, s_candidate.ssid, 32)) {
-            if (!strncmp(s_candidate.server, "ws://", 5)) setup_join(s_candidate.server, now);
-            else atomic_store(&s_setup_status, begin_search(now) ? SETUP_FIND : SETUP_NO_HOST);
+            if (!strncmp(s_candidate.server, "ws://", 5) || !strncmp(s_candidate.server, "wss://", 6)) {
+                setup_join(s_candidate.server, now);
+            } else {
+                atomic_store(&s_setup_status, begin_search(now) ? SETUP_FIND : SETUP_NO_HOST);
+            }
         } else if (now - s_test_start >= SETUP_TIMEOUT_MS) {
             esp_wifi_disconnect();
             atomic_store(&s_setup_status, SETUP_WIFI_FAILED);
@@ -674,7 +694,7 @@ static void setup_tick(vote_view_t *view, int64_t now, EventBits_t bits)
             if (strstr(s_error, "入场码")) outcome = SETUP_BAD_CODE;
             else if (strstr(s_error, "设备已满") || strstr(s_error, "10 台")) outcome = SETUP_FULL;
             else outcome = SETUP_DENIED;
-        } else if (!(bits & WIFI_READY) || now - s_test_start >= 12000) {
+        } else if (!(bits & WIFI_READY) || now - s_test_start >= (strncmp(s_candidate.server, "wss://", 6) == 0 ? 20000 : 12000)) {
             outcome = SETUP_UNREACHABLE;
         }
         if (outcome != SETUP_JOIN) {
@@ -911,6 +931,9 @@ void vote_net_tick(vote_view_t *view, int64_t now_ms)
         send_text("{\"v\":1,\"type\":\"sync\"}");
         s_sync_at = now_ms + 15000;
     }
-    const char *status = !(bits & WIFI_READY) ? "连接路由器中" : view->model.connected ? "等待主持人发题" : "连接主持电脑中";
+    const bool is_cloud = strncmp(s_saved.server, "wss://", 6) == 0;
+    const char *status = !(bits & WIFI_READY) ? "连接路由器中"
+                         : view->model.connected ? "等待主持人发题"
+                         : is_cloud ? "连接云端主持台中" : "连接主持电脑中";
     snprintf(view->status, sizeof(view->status), "%s", s_error[0] ? s_error : status);
 }

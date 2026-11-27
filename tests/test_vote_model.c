@@ -75,6 +75,14 @@ int main(void)
     strcpy(settings.server, "ws://127.0.0.1:8765/ws"); assert(!vote_settings_valid(&settings));
     strcpy(settings.server, "ws://192.168.1.2:8765/ws/evil"); assert(!vote_settings_valid(&settings));
     strcpy(settings.server, "ws://10.0.0.2:8765/ws"); assert(vote_settings_valid(&settings));
+    strcpy(settings.server, "wss://gongxuan-vote.example.workers.dev/ws"); assert(vote_settings_valid(&settings));
+    strcpy(settings.server, "wss://gongxuan-vote.example.workers.dev:443/ws"); assert(vote_settings_valid(&settings));
+    strcpy(settings.server, "wss://localhost/ws"); assert(!vote_settings_valid(&settings));
+    strcpy(settings.server, "wss://192.168.1.2/ws"); assert(!vote_settings_valid(&settings));
+    strcpy(settings.server, "wss://bad..workers.dev/ws"); assert(!vote_settings_valid(&settings));
+    strcpy(settings.server, "wss://-bad.workers.dev/ws"); assert(!vote_settings_valid(&settings));
+    strcpy(settings.server, "wss://gongxuan.workers.dev/evil"); assert(!vote_settings_valid(&settings));
+    strcpy(settings.server, "ws://gongxuan.workers.dev/ws"); assert(!vote_settings_valid(&settings));
     settings.server[0] = 0; assert(vote_settings_valid(&settings));
     strcpy(settings.server, "auto:0123456789abcdef"); assert(vote_settings_valid(&settings));
     strcpy(settings.server, "auto:abcd"); assert(!vote_settings_valid(&settings));

@@ -2,8 +2,11 @@
 const $ = (id) => document.getElementById(id);
 const pageParams = new URLSearchParams(location.search);
 const stageView = pageParams.get("view") === "stage";
+const stageToken = pageParams.get("stage_token") || "";
 
 let state = null;
+let authRequired = false;
+let cloudAutoOpened = false;
 let busy = false;
 let coverage = [];
 let stateAt = 0;
@@ -1082,12 +1085,18 @@ function activeLivePoll() {
 function updateButtons() {
   const p = state?.poll;
   if (stageView) {
-    $("stage-close").disabled = busy || p?.phase !== "open";
-    $("stage-publish").disabled = busy || !p || p.phase === "published";
+    const readonly = !!state?.readonly_stage;
+    $("stage-close").hidden = readonly;
+    $("stage-publish").hidden = readonly;
+    $("stage-close").disabled = readonly || busy || p?.phase !== "open";
+    $("stage-publish").disabled = readonly || busy || !p || p.phase === "published";
     $("stage-export").disabled = !p;
     return;
   }
   updateEditor();
+  $("rotate-code-btn").hidden = !state?.supports_rotate_join_code;
+  $("rotate-code-btn").disabled = busy || !state?.supports_rotate_join_code;
+  $("btn-logout").hidden = !state?.cloud_mode;
   $("history-delete-submit").disabled = busy || !state?.supports_history_delete;
   $("history-delete-cancel").disabled = busy;
   document.querySelectorAll(".history-delete-button").forEach((button) => {
@@ -1353,6 +1362,9 @@ function renderOpenJoin() {
   const btn = $("open-join-btn");
   if (!state?.supports_open_join) {
     btn.hidden = true;
+    if (state?.cloud_mode) {
+      $("session-sub").textContent = "云端会场 · 投票器填入下方接入地址与 6 位入场码即可加入";
+    }
     return;
   }
   btn.hidden = false;
@@ -1396,13 +1408,25 @@ function render() {
     historyCount = state.history_count;
     loadHistory();
   }
-  $("btn-stage").href = batch && p ? `/?view=stage&question=${encodeURIComponent(p.id)}` : "/?view=stage";
+  const stageBase = state.cloud_mode && state.stage_share_path ? state.stage_share_path : "/?view=stage";
+  $("btn-stage").href =
+    batch && p
+      ? `${stageBase}${stageBase.includes("?") ? "&" : "?"}question=${encodeURIComponent(p.id)}`
+      : stageBase;
+
+  if (state.cloud_mode && !window.pywebview?.api) {
+    $("runtime-badge").textContent = "云端运行";
+    $("footer-brand").textContent = "共选 · 云端多人互动投票器";
+    $("footer-hint").textContent = "Cloudflare 边缘托管 · 手机浏览器随时控场 · 按 F 进入大屏模式";
+  }
 
   const maxDevices = state.max_devices || 10;
   $("current-report").hidden = !p || p.phase === "open" || state.latest_report !== state.poll.id;
   $("join-code").textContent = state.join_code;
   renderOpenJoin();
   $("online").textContent = String(onlineCount);
+  $("mobile-online-chip").textContent = String(onlineCount);
+  $("mobile-live-dot").hidden = p?.phase !== "open";
   $("online-sub").textContent = `最多 ${maxDevices} 台`;
   $("online-limit").textContent = ` / ${maxDevices} 台`;
   $("online-bar").style.width = `${Math.min(100, (onlineCount / maxDevices) * 100)}%`;
@@ -1529,14 +1553,27 @@ function render() {
   }
 
   let discoveryText = "自动发现未开启，请使用下方手动地址";
-  if (!("discovery_available" in state)) {
-    discoveryText = "重启新版主持服务即可启用自动发现";
-  }
-  if (state.discovery_available) {
-    discoveryText = "自动发现已开启 · 主持台 " + state.host_id.slice(-8).toUpperCase();
+  if (state.cloud_mode) {
+    discoveryText = "云端主持台在线 · 任意 Wi-Fi / 热点均可接入";
+    $("network-guide").textContent = "手机扫投票器二维码配网，填入下方云端地址和 6 位入场码。";
+    $("manual-net-summary").textContent = "投票器云端接入地址（WSS）";
+    $("copy-address").textContent = "复制接入地址";
+    $("copy-stage-link").hidden = !state.stage_share_path;
+    if (!cloudAutoOpened) {
+      $("manual-net-box").open = true;
+      cloudAutoOpened = true;
+    }
+  } else {
+    if (!("discovery_available" in state)) {
+      discoveryText = "重启新版主持服务即可启用自动发现";
+    }
+    if (state.discovery_available) {
+      discoveryText = "自动发现已开启 · 主持台 " + state.host_id.slice(-8).toUpperCase();
+    }
+    $("copy-stage-link").hidden = true;
   }
   $("discovery-status").textContent = discoveryText;
-  $("discovery-pill").classList.toggle("on", !!state.discovery_available);
+  $("discovery-pill").classList.toggle("on", !!(state.cloud_mode || state.discovery_available));
 
   $("server-address").textContent =
     state.addresses.join("  或  ") ||
@@ -1558,6 +1595,7 @@ if (stageView) {
   document.title = "共选 · 现场大屏";
   document.querySelector(".topbar").hidden = true;
   document.querySelector("main").hidden = true;
+  $("mobile-nav").hidden = true;
   $("stage-overlay").hidden = false;
   $("stage-overlay").querySelector(".stage-top").after($("notice"));
   document.addEventListener("fullscreenchange", () => {
@@ -1583,18 +1621,105 @@ function stepBatchQuestion(delta) {
   render();
 }
 
+function setCloudLoginVisible(visible, errorMessage = "") {
+  authRequired = visible;
+  $("cloud-login").hidden = !visible;
+  const errEl = $("cloud-login-error");
+  errEl.textContent = errorMessage;
+  errEl.hidden = !errorMessage;
+  if (visible) {
+    $("cloud-login-password").focus();
+  }
+}
+
+$("cloud-login-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const submitBtn = $("cloud-login-submit");
+  const password = $("cloud-login-password").value;
+  if (!password) return;
+  submitBtn.disabled = true;
+  $("cloud-login-error").hidden = true;
+  try {
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setCloudLoginVisible(true, result.error || "登录失败，请重试");
+      return;
+    }
+    $("cloud-login-password").value = "";
+    setCloudLoginVisible(false);
+    await refresh();
+  } catch {
+    setCloudLoginVisible(true, "无法连接云端主持服务，请检查网络");
+  } finally {
+    submitBtn.disabled = false;
+  }
+};
+
+$("btn-logout").onclick = async () => {
+  try {
+    await fetch("/api/auth/logout", { method: "POST" });
+  } catch {
+    // ignore network failure
+  }
+  state = null;
+  setCloudLoginVisible(true);
+};
+
+$("rotate-code-btn").onclick = async () => {
+  if (!state?.supports_rotate_join_code || busy) return;
+  if (!window.confirm("更换新的 6 位入场码？已在线的投票器不受影响，新接入设备需使用新码。")) return;
+  if (await action("rotate_join_code", {})) {
+    showToast(`已切换新入场码 ${state?.join_code || ""}`);
+  }
+};
+
+$("copy-stage-link").onclick = () => {
+  if (!state?.stage_share_path) return;
+  const fullUrl = new URL(state.stage_share_path, location.origin).href;
+  copyText(fullUrl, "大屏只读链接已复制，可在电脑或平板免登录投屏");
+};
+
+document.querySelectorAll(".mobile-nav-btn").forEach((btn) => {
+  btn.onclick = () => {
+    const target = $(btn.dataset.target);
+    if (!target) return;
+    document.querySelectorAll(".mobile-nav-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+});
+
 /* ==================== 轮询与事件绑定 ==================== */
 async function refresh() {
   const sequence = ++refreshSequence;
   try {
-    const response = await fetch("/api/state", { cache: "no-store" });
+    const stateUrl =
+      stageView && stageToken ? `/api/state?stage_token=${encodeURIComponent(stageToken)}` : "/api/state";
+    const response = await fetch(stateUrl, { cache: "no-store" });
+    if (response.status === 401) {
+      const errData = await response.json().catch(() => ({}));
+      if (sequence !== refreshSequence) return;
+      state = null;
+      $("dot").classList.remove("on");
+      $("connection").textContent = "等待登录";
+      if (errData.auth_required) {
+        setCloudLoginVisible(true, stageView && stageToken ? "大屏链接已失效，请重新复制或登录主持台" : "");
+      }
+      updateButtons();
+      return;
+    }
     if (!response.ok) throw Error();
     const data = await response.json();
     if (sequence !== refreshSequence) return;
+    if (authRequired) setCloudLoginVisible(false);
     state = data;
     stateAt = performance.now();
     $("dot").classList.add("on");
-    $("connection").textContent = "主持服务已连接";
+    $("connection").textContent = data.cloud_mode ? "云端服务已连接" : "主持服务已连接";
     render();
   } catch {
     if (sequence !== refreshSequence) return;
@@ -1640,7 +1765,7 @@ $("copy-code").onclick = async () => {
 
 $("copy-address").onclick = () => {
   const addr = state?.addresses?.[0] || $("server-address").textContent;
-  copyText(addr, "局域网地址已复制");
+  copyText(addr, state?.cloud_mode ? "云端接入地址已复制" : "局域网地址已复制");
 };
 
 $("btn-copy-result").onclick = () => {
@@ -1890,7 +2015,7 @@ $("stage-close").onclick = () => action("close", { poll_id: state?.poll?.id });
 $("stage-publish").onclick = () => action("publish", { poll_id: state?.poll?.id });
 
 document.addEventListener("keydown", (event) => {
-  if (libraryDialog.open || historyDeleteDialog.open) return;
+  if (libraryDialog.open || historyDeleteDialog.open || authRequired) return;
   const tag = document.activeElement?.tagName;
   const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {

@@ -38,9 +38,9 @@
     <div id="password-row"><label for="password">Wi-Fi 密码</label><input id="password" type="password" maxlength="63" autocomplete="off"></div>
     <label for="code">主持台六位入场码</label>
     <input id="code" required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="off" placeholder="见电脑主持台">
-    <details><summary>手动指定主持电脑</summary>
-      <label for="server">电脑地址</label>
-      <input id="server" maxlength="95" autocomplete="off" autocapitalize="none" placeholder="例如 192.168.1.20，留空自动寻找">
+    <details id="server-details"><summary>云端主持台或手动指定地址</summary>
+      <label for="server">主持台地址（云端填 workers.dev，局域网留空自动寻找）</label>
+      <input id="server" maxlength="95" autocomplete="off" autocapitalize="none" placeholder="例如 xxx.workers.dev 或 192.168.1.20">
     </details>
     <button id="submit" type="submit">连接并入场</button>
   </form>
@@ -51,7 +51,27 @@
 <script>
   const $ = id => document.getElementById(id);
   let networks = [], busy = false, finished = false, submitting = false, scans = 0;
-  let activeScan = 0, lastChoices = "", savedSsid = "", wifiTouched = false;
+  let activeScan = 0, lastChoices = "", savedSsid = "", savedServer = "", wifiTouched = false, serverTouched = false;
+  $("server").oninput = () => { serverTouched = true; };
+  function normalizeServer(raw) {
+    let s = raw.trim();
+    if (!s) return "";
+    if (/^https?:\/\//i.test(s)) {
+      s = s.replace(/^https:\/\//i, "wss://").replace(/^http:\/\//i, "ws://");
+      s = s.replace(/\/+$/, "");
+      if (!s.endsWith("/ws")) s += "/ws";
+      return s;
+    }
+    if (/^wss?:\/\//i.test(s)) {
+      s = s.replace(/\/+$/, "");
+      if (!s.endsWith("/ws")) s += "/ws";
+      return s;
+    }
+    if (/^[\d.]+(:\d+)?$/.test(s)) return "ws://" + s + (s.includes(":") ? "" : ":8765") + "/ws";
+    s = s.replace(/\/+$/, "");
+    if (s.endsWith("/ws")) return "wss://" + s;
+    return "wss://" + s + "/ws";
+  }
   function chosen() {
     const value = $("wifi").value;
     return value !== "" && value !== "manual" && value !== "keep" ? networks[Number(value)] : null;
@@ -111,8 +131,7 @@
   $("form").onsubmit = event => {
     event.preventDefault();
     if (busy || submitting || finished) return;
-    let server = $("server").value.trim();
-    if (/^[\d.]+(:\d+)?$/.test(server)) server = "ws://" + server + (server.includes(":") ? "" : ":8765") + "/ws";
+    let server = normalizeServer($("server").value);
     if ($("wifi").value === "keep" && savedSsid) {
       submit({keep_wifi:true, code:$("code").value.trim(), server});
       return;
@@ -132,6 +151,13 @@
       if (typeof s.saved_ssid === "string" && s.saved_ssid && s.saved_ssid !== savedSsid) {
         savedSsid = s.saved_ssid;
         rebuildWifiOptions(false);
+      }
+      if (typeof s.saved_server === "string" && s.saved_server && s.saved_server !== savedServer) {
+        savedServer = s.saved_server;
+        if (!serverTouched && !$("server").value) {
+          $("server").value = savedServer;
+          if (savedServer.startsWith("wss://")) $("server-details").open = true;
+        }
       }
       if (!submitting) {
         busy = s.busy;

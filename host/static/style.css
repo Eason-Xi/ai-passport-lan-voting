@@ -2906,4 +2906,134 @@ footer {
     flex-direction: column;
     gap: 4px;
   }
+  main {
+    padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+  }
+  .mobile-nav {
+    display: grid;
+  }
+  .toast {
+    bottom: calc(74px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* ==================== 手机端底部悬浮导航栏 ==================== */
+.mobile-nav {
+  display: none;
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  z-index: 60;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 5px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: saturate(180%) blur(22px);
+  -webkit-backdrop-filter: saturate(180%) blur(22px);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.14),
+    0 0 0 0.5px rgba(0, 0, 0, 0.08);
+}
+
+.mobile-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 38px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.mobile-nav-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.mobile-nav-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  display: inline-block;
+}
+
+.mobile-nav-chip {
+  font-style: normal;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.07);
+  color: var(--label-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-grid;
+  place-items: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==================== 云端管理员登录遮罩 ==================== */
+.cloud-login {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(245, 245, 247, 0.84);
+  backdrop-filter: saturate(180%) blur(24px);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+}
+
+.cloud-login-card {
+  width: min(400px, 100%);
+  padding: 28px 26px 24px;
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-dialog);
+}
+
+.cloud-login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.cloud-login-brand h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.cloud-login-brand p {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  color: var(--label-secondary);
+}
+
+.cloud-login-card label {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--label-secondary);
+  margin-bottom: 6px;
+}
+
+.cloud-login-card input {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.cloud-login-error {
+  color: var(--red-ink);
+  margin: 0 0 12px;
 }
