@@ -2,6 +2,7 @@
 #include "vote_model.h"
 typedef struct {
     vote_model_t model;
+    vote_switch_t sw;
     int battery;
     bool setup;
     bool setup_page_qr;

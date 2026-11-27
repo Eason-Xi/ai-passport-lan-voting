@@ -13,6 +13,7 @@
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
@@ -61,6 +62,11 @@ static int64_t s_deadline_ms = -1;
 static int64_t s_rediscover_at;
 static char s_error[128];
 static vote_rx_t s_rx;
+static bool s_switch_active;
+static vote_host_t s_switch_hosts[VOTE_HOST_LIMIT];
+static int s_switch_host_count;
+static vote_host_t s_switch_target;
+static int64_t s_switch_deadline;
 typedef struct { uint32_t generation; char text[VOTE_MESSAGE_BYTES]; } packet_t;
 static packet_t s_callback_packet;
 enum { SETUP_IDLE, SETUP_WIFI, SETUP_SAVED, SETUP_WIFI_FAILED, SETUP_STORE_FAILED,
@@ -133,16 +139,26 @@ esp_err_t vote_net_remember_choice(const vote_model_t *model)
     return err;
 }
 
-static esp_err_t save_candidate(void)
+static esp_err_t save_settings_blob(const vote_settings_t *settings, bool clear_pending)
 {
     nvs_handle_t nvs;
     esp_err_t err = nvs_open("lan_vote", NVS_READWRITE, &nvs);
     if (err != ESP_OK) return err;
-    err = nvs_set_blob(nvs, "network", &s_candidate, sizeof(s_candidate));
+    err = nvs_set_blob(nvs, "network", settings, sizeof(*settings));
     if (err == ESP_OK) err = nvs_set_u8(nvs, "setup", 0);
+    if (err == ESP_OK && clear_pending) {
+        vote_pending_t empty = {0};
+        err = nvs_set_blob(nvs, "pending_v1", &empty, sizeof(empty));
+        if (err == ESP_OK) s_persisted_vote = empty;
+    }
     if (err == ESP_OK) err = nvs_commit(nvs);
     nvs_close(nvs);
     return err;
+}
+
+static esp_err_t save_candidate(void)
+{
+    return save_settings_blob(&s_candidate, false);
 }
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -214,11 +230,27 @@ static esp_err_t setup_page(httpd_req_t *req)
     return httpd_resp_send(req, setup_html_start, setup_html_end - setup_html_start - 1);
 }
 
+static int append_json_escaped(char *dest, size_t size, const char *src)
+{
+    size_t used = 0;
+    for (const unsigned char *p = (const unsigned char *)src; *p && used + 2 < size; p++) {
+        if (*p == '"' || *p == '\\') {
+            if (used + 3 >= size) break;
+            dest[used++] = '\\';
+            dest[used++] = (char)*p;
+        } else if (*p >= 32) {
+            dest[used++] = (char)*p;
+        }
+    }
+    dest[used] = 0;
+    return (int)used;
+}
+
 static esp_err_t setup_status(httpd_req_t *req)
 {
     if (!portal_host(req)) return redirect_portal(req, HTTPD_404_NOT_FOUND);
     int status = atomic_load(&s_setup_status);
-    char json[512];
+    char json[640];
     int used = snprintf(json, sizeof(json), "{\"status\":%d,\"message\":\"%s\",\"busy\":%s,\"hosts\":[",
                         status, SETUP_TEXT[status], setup_busy(status) ? "true" : "false");
     if (status == SETUP_PICK) {
@@ -229,7 +261,13 @@ static esp_err_t setup_status(httpd_req_t *req)
         for (unsigned i = 0; i < choices.count; i++)
             used += snprintf(json + used, sizeof(json) - used, "%s\"%s\"", i ? "," : "", choices.ids[i]);
     }
-    strcpy(json + used, "]}");
+    used += snprintf(json + used, sizeof(json) - used, "]");
+    if (s_has_saved && vote_ssid_displayable(s_saved.ssid)) {
+        char escaped[72];
+        append_json_escaped(escaped, sizeof(escaped), s_saved.ssid);
+        used += snprintf(json + used, sizeof(json) - used, ",\"saved_ssid\":\"%s\"", escaped);
+    }
+    snprintf(json + used, sizeof(json) - used, "}");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_sendstr(req, json);
@@ -285,6 +323,11 @@ static esp_err_t setup_submit(httpd_req_t *req)
             config.version = 0; // 由应用任务沿用本次已验证的 Wi-Fi，仅选择主持台。
             snprintf(config.server, sizeof(config.server), "auto:%s", pick->valuestring);
         }
+    } else if (json && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "keep_wifi")) && s_has_saved) {
+        strcpy(config.ssid, s_saved.ssid);
+        strcpy(config.password, s_saved.password);
+        valid = (!cJSON_HasObjectItem(json, "server") || copy_json_string(json, "server", config.server, sizeof(config.server))) &&
+            copy_json_string(json, "code", config.code, sizeof(config.code)) && vote_settings_valid(&config);
     } else {
         valid = json && copy_json_string(json, "ssid", config.ssid, sizeof(config.ssid)) &&
             copy_json_string(json, "password", config.password, sizeof(config.password)) &&
@@ -666,11 +709,178 @@ static void connect_host(int64_t now)
     s_rediscover_at = now + 10000;
 }
 
+static void switch_fail(vote_view_t *view, const char *message)
+{
+    stop_ws();
+    vote_discovery_close(&s_search);
+    if (!view->sw.open_join && strstr(message, "入场码")) {
+        vote_switch_open_code(&view->sw, "入场码错误，请核对重试");
+    } else {
+        view->sw.failed = true;
+        snprintf(view->sw.hint, sizeof(view->sw.hint), "%s", message);
+    }
+}
+
+void vote_net_switch_scan(vote_view_t *view)
+{
+    if (s_setup) return;
+    stop_ws();
+    vote_discovery_close(&s_search);
+    s_error[0] = 0;
+    s_switch_active = true;
+    s_switch_host_count = 0;
+    if (!(xEventGroupGetBits(s_events) & WIFI_READY)) {
+        view->sw.mode = VOTE_SWITCH_SCAN;
+        view->sw.failed = true;
+        snprintf(view->sw.hint, sizeof(view->sw.hint), "当前未连 Wi-Fi，请重配网络");
+        return;
+    }
+    int64_t now = esp_timer_get_time() / 1000;
+    if (!begin_search(now)) {
+        view->sw.mode = VOTE_SWITCH_SCAN;
+        view->sw.failed = true;
+        snprintf(view->sw.hint, sizeof(view->sw.hint), "网络搜索失败，请重试");
+    }
+}
+
+void vote_net_switch_join(vote_view_t *view)
+{
+    if (s_setup || view->sw.host_index < 0 || view->sw.host_index >= view->sw.host_count) return;
+    const char *wanted = view->sw.hosts[view->sw.host_index].id;
+    bool found = false;
+    for (int i = 0; i < s_switch_host_count; i++) {
+        if (!strcmp(s_switch_hosts[i].id, wanted)) {
+            s_switch_target = s_switch_hosts[i];
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        switch_fail(view, "会场信息已过期，请重新搜索");
+        return;
+    }
+    stop_ws();
+    vote_discovery_close(&s_search);
+    s_error[0] = 0;
+    s_switch_active = true;
+    s_switch_deadline = esp_timer_get_time() / 1000 + 10000;
+    if (!start_ws(s_switch_target.uri)) {
+        switch_fail(view, "无法连接主持台，请重试");
+    }
+}
+
+void vote_net_switch_cancel(vote_view_t *view)
+{
+    if (s_switch_active) {
+        stop_ws();
+        vote_discovery_close(&s_search);
+        s_switch_active = false;
+        s_error[0] = 0;
+        s_retry_at = 0;
+    }
+    vote_switch_close(&view->sw);
+}
+
+static void switch_tick(vote_view_t *view, int64_t now_ms, EventBits_t bits)
+{
+    if (view->sw.mode == VOTE_SWITCH_SCAN && !view->sw.failed) {
+        if (!(bits & WIFI_READY)) {
+            switch_fail(view, "现场 Wi-Fi 已断开");
+            return;
+        }
+        if (!vote_discovery_poll(&s_search, NULL, now_ms)) return;
+        s_switch_host_count = s_search.count;
+        vote_switch_host_t list[VOTE_HOST_LIMIT] = {0};
+        for (int i = 0; i < s_search.count; i++) {
+            s_switch_hosts[i] = s_search.hosts[i];
+            strcpy(list[i].id, s_search.hosts[i].id);
+            list[i].open_join = s_search.hosts[i].open_join;
+        }
+        if (vote_switch_apply_hosts(&view->sw, list, s_search.count)) {
+            vote_net_switch_join(view);
+        }
+        return;
+    }
+    if (view->sw.mode != VOTE_SWITCH_JOINING || view->sw.failed) return;
+    if (!(bits & WIFI_READY)) {
+        switch_fail(view, "现场 Wi-Fi 已断开");
+        return;
+    }
+    uint32_t generation = atomic_load(&s_generation);
+    if (!(bits & WS_READY) || generation != s_seen_generation) {
+        s_hello = false;
+        s_seen_generation = generation;
+    }
+    if ((bits & WS_READY) && s_ws && !s_hello) {
+        char hello[128];
+        if (view->sw.open_join) {
+            snprintf(hello, sizeof(hello),
+                     "{\"v\":1,\"type\":\"hello\",\"device_id\":\"%s\",\"open_join\":true}", view->device);
+        } else {
+            snprintf(hello, sizeof(hello),
+                     "{\"v\":1,\"type\":\"hello\",\"device_id\":\"%s\",\"code\":\"%s\"}", view->device, view->sw.code);
+        }
+        send_text(hello);
+        s_hello = true;
+    }
+    packet_t packet;
+    if (xQueueReceive(s_rx_queue, &packet, 0) == pdTRUE && packet.generation == generation) {
+        vote_snapshot_t snapshot;
+        int64_t remaining_ms;
+        cJSON *json = vote_parse_json_object(packet.text, sizeof(packet.text) - 1);
+        if (vote_snapshot_from_json(json, &snapshot, &remaining_ms) && (bits & WS_READY)) {
+            char new_code[7] = {0};
+            bool code_ok = view->sw.open_join ? vote_extract_join_code(json, new_code)
+                                              : (memcpy(new_code, view->sw.code, 7), true);
+            cJSON_Delete(json);
+            if (!code_ok) {
+                switch_fail(view, "该主持台不支持一键入场，请输码");
+                return;
+            }
+            vote_settings_t next = s_saved;
+            snprintf(next.server, sizeof(next.server), "auto:%s", s_switch_target.id);
+            memcpy(next.code, new_code, 7);
+            if (!vote_settings_valid(&next) || save_settings_blob(&next, true) != ESP_OK) {
+                switch_fail(view, "保存配置失败，请重试");
+                return;
+            }
+            s_saved = next;
+            s_has_saved = true;
+            s_switch_active = false;
+            s_error[0] = 0;
+            vote_switch_close(&view->sw);
+            vote_model_init(&view->model);
+            s_deadline_ms = remaining_ms < 0 ? -1 : now_ms + remaining_ms;
+            vote_model_apply(&view->model, &snapshot);
+            s_sync_at = now_ms + 5000;
+            s_rediscover_at = now_ms + 10000;
+            return;
+        }
+        const cJSON *type = cJSON_GetObjectItemCaseSensitive(json, "type");
+        const cJSON *message = cJSON_GetObjectItemCaseSensitive(json, "message");
+        char reason[96] = "主持台拒绝连接，请重试";
+        if (cJSON_IsString(type) && !strcmp(type->valuestring, "error") && cJSON_IsString(message) &&
+            strlen(message->valuestring) < sizeof(reason) && vote_text_valid(message->valuestring, 40)) {
+            strcpy(reason, message->valuestring);
+        }
+        cJSON_Delete(json);
+        switch_fail(view, reason);
+        return;
+    }
+    if (now_ms >= s_switch_deadline) {
+        switch_fail(view, "主持电脑未响应，请重试");
+    }
+}
+
 void vote_net_tick(vote_view_t *view, int64_t now_ms)
 {
     EventBits_t bits = xEventGroupGetBits(s_events);
     if (s_setup) {
         setup_tick(view, now_ms, bits);
+        return;
+    }
+    if (s_switch_active) {
+        switch_tick(view, now_ms, bits);
         return;
     }
     if (!(bits & WIFI_READY)) {

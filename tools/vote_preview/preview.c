@@ -135,5 +135,20 @@ int main(int argc, char **argv)
     vote_model_apply(&view.model, &poll); capture("22-batch-complete");
     poll.phase = VOTE_PUBLISHED; poll.counts[0] = 6; poll.counts[1] = 4; poll.total = 10; seconds_left = -1;
     vote_model_apply(&view.model, &poll); capture("23-batch-results");
+    vote_switch_open_menu(&view.sw);
+    capture("24-switch-menu");
+    vote_switch_open_code(&view.sw, "");
+    memcpy(view.sw.code, "512970", 7); view.sw.cursor = 2;
+    capture("25-switch-code");
+    vote_switch_open_menu(&view.sw);
+    vote_switch_key(&view.sw, VOTE_OK, false);
+    vote_switch_host_t found[2] = {{.id = "000000004d8fc474", .open_join = true}, {.id = "000000003dc89998", .open_join = true}};
+    vote_switch_apply_hosts(&view.sw, found, 2);
+    capture("26-switch-pick");
+    vote_switch_open_menu(&view.sw);
+    vote_switch_key(&view.sw, VOTE_OK, false);
+    vote_switch_apply_hosts(&view.sw, NULL, 0);
+    capture("27-switch-scan-fail");
+    vote_switch_close(&view.sw);
     return 0;
 }

@@ -74,22 +74,33 @@ void app_main(void)
                 if (s_view.setup) {
                     if (s_view.setup_can_exit && vote_net_setup(false) != ESP_OK)
                         snprintf(s_view.status, sizeof(s_view.status), "保存失败，请重试");
-                } else s_view.settings_prompt = !s_view.settings_prompt;
+                } else if (s_view.sw.mode != VOTE_SWITCH_NONE) {
+                    vote_net_switch_cancel(&s_view);
+                } else {
+                    vote_switch_open_menu(&s_view.sw);
+                }
             } else if (s_view.setup && input.event == BSP_BTN_CLICK && input.key != BSP_BTN_OK) {
                 s_view.setup_page_qr = !s_view.setup_page_qr;
-            } else if (!s_view.setup && !s_view.settings_prompt && s_view.model.connected &&
+            } else if (!s_view.setup && s_view.sw.mode == VOTE_SWITCH_NONE && s_view.model.connected &&
                        s_view.model.poll.batch_count > 1 && s_view.model.poll.phase == VOTE_PUBLISHED &&
                        ((input.event == BSP_BTN_LONG && input.key != BSP_BTN_OK) ||
                         (input.event == BSP_BTN_CLICK && input.key == BSP_BTN_OK))) {
                 vote_net_view_question(input.key == BSP_BTN_UP ? s_view.model.poll.prev_id : s_view.model.poll.next_id);
             } else if ((input.event == BSP_BTN_CLICK || input.event == BSP_BTN_DOUBLE) && !s_view.setup) {
-                if (s_view.settings_prompt) {
-                    if (input.key == BSP_BTN_OK && network_ready) {
+                const vote_key_t key = input.key == BSP_BTN_UP ? VOTE_UP :
+                                       input.key == BSP_BTN_DOWN ? VOTE_DOWN : VOTE_OK;
+                if (s_view.sw.mode != VOTE_SWITCH_NONE) {
+                    vote_switch_action_t act = vote_switch_key(&s_view.sw, key, input.event == BSP_BTN_DOUBLE);
+                    if (act == VOTE_SW_ACT_SCAN_OPEN || act == VOTE_SW_ACT_SCAN_CODE) {
+                        vote_net_switch_scan(&s_view);
+                    } else if (act == VOTE_SW_ACT_JOIN_HOST) {
+                        vote_net_switch_join(&s_view);
+                    } else if (act == VOTE_SW_ACT_ENTER_SETUP && network_ready) {
                         if (vote_net_setup(true) != ESP_OK) snprintf(s_view.status, sizeof(s_view.status), "保存失败，请重试");
-                    } else s_view.settings_prompt = false;
+                    } else if (act == VOTE_SW_ACT_CLOSE) {
+                        vote_net_switch_cancel(&s_view);
+                    }
                 } else {
-                    const vote_key_t key = input.key == BSP_BTN_UP ? VOTE_UP :
-                                           input.key == BSP_BTN_DOWN ? VOTE_DOWN : VOTE_OK;
                     s_view.ballot_save_failed = false;
                     if (vote_model_key(&s_view.model, key) && vote_net_remember_choice(&s_view.model) != ESP_OK) {
                         // 提交前先持久化。保存失败时仍停在确认页，不发送可能丢失的选票。
@@ -105,7 +116,7 @@ void app_main(void)
             battery_at = now + 10000;
         }
         if (!keys_ready) snprintf(s_view.status, sizeof(s_view.status), "按键初始化失败");
-        int64_t seconds = s_view.model.poll.phase == VOTE_OPEN && !s_view.setup && !s_view.settings_prompt
+        int64_t seconds = s_view.model.poll.phase == VOTE_OPEN && !s_view.setup && s_view.sw.mode == VOTE_SWITCH_NONE
                           ? vote_net_seconds_left(now) : -1;
         bool redraw = memcmp(&s_view, &s_drawn, sizeof(s_view)) != 0;
         if (redraw || seconds != drawn_seconds) {

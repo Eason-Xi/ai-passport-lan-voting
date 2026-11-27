@@ -1101,6 +1101,8 @@ function updateButtons() {
     button.hidden = !state?.supports_question_library;
     button.disabled = busy;
   });
+  $("open-join-btn").hidden = !state?.supports_open_join;
+  $("open-join-btn").disabled = busy || !state?.supports_open_join;
   $("device-limit").disabled = !state?.device_limit_max || busy;
   $("save-device-limit").disabled = $("device-limit").disabled;
   document.querySelectorAll(".question-mode").forEach((control) => {
@@ -1339,6 +1341,24 @@ function renderDevices(batch) {
   }
 }
 
+function renderOpenJoin() {
+  const btn = $("open-join-btn");
+  if (!state?.supports_open_join) {
+    btn.hidden = true;
+    return;
+  }
+  btn.hidden = false;
+  const until = state.open_join_until_ms;
+  const leftMs = until && state.server_now_ms ? Math.max(0, until - hostNow()) : 0;
+  const seconds = Math.ceil(leftMs / 1000);
+  const active = seconds > 0;
+  btn.classList.toggle("active", active);
+  $("open-join-text").textContent = active ? `一键入场 ${seconds}s` : "一键入场";
+  $("session-sub").textContent = active
+    ? "一键入场开放中：投票器长按确定即可免输码加入（再点关闭）"
+    : "投票器可本机输码或点一键入场 · 同局域网自动发现";
+}
+
 function render() {
   const batch = state.batch?.polls;
   const picker = $("live-question");
@@ -1373,6 +1393,7 @@ function render() {
   const maxDevices = state.max_devices || 10;
   $("current-report").hidden = !p || p.phase === "open" || state.latest_report !== state.poll.id;
   $("join-code").textContent = state.join_code;
+  renderOpenJoin();
   $("online").textContent = String(onlineCount);
   $("online-sub").textContent = `最多 ${maxDevices} 台`;
   $("online-limit").textContent = ` / ${maxDevices} 台`;
@@ -1587,6 +1608,15 @@ $("live-question").onchange = () => {
 $("show-result").onclick = () => {
   if (state?.batch) {
     action("show_result", { batch_id: state.batch.id, poll_id: $("live-question").value });
+  }
+};
+
+$("open-join-btn").onclick = async () => {
+  if (!state?.supports_open_join || busy) return;
+  const active = state.open_join_until_ms && state.server_now_ms && state.open_join_until_ms > hostNow();
+  const seconds = active ? 0 : 60;
+  if (await action("open_join", { seconds })) {
+    showToast(seconds ? "已开放 60 秒一键入场，投票器长按确定可免输码加入" : "已关闭一键入场");
   }
 };
 
@@ -1887,6 +1917,9 @@ setInterval(() => {
   if (state?.poll?.phase === "open" && state.poll.deadline_at_ms) {
     if (stageView) renderStageDeadline(state.poll);
     else renderDeadline(state.poll);
+  }
+  if (state?.supports_open_join && state.open_join_until_ms) {
+    renderOpenJoin();
   }
 }, 250);
 

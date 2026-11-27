@@ -68,6 +68,108 @@ void vote_ui_show_remaining(int64_t seconds)
     }
 }
 
+static void format_host_tag(char out[12], const char *host_id)
+{
+    size_t len = strlen(host_id);
+    const char *tail = len >= 8 ? host_id + len - 8 : host_id;
+    size_t i = 0;
+    for (; tail[i] && i < 8; i++) {
+        char c = tail[i];
+        out[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+    }
+    out[i] = 0;
+}
+
+static void render_switch(lv_obj_t *root, const vote_switch_t *sw)
+{
+    char text[96];
+    if (sw->mode == VOTE_SWITCH_MENU) {
+        line(root, 50, "切换会场 / 配网", INK);
+        static const char *const items[3] = {"一键加入会场", "输入新入场码", "重新配置网络"};
+        for (int i = 0; i < 3; i++) {
+            bool selected = i == sw->menu_index;
+            lv_obj_t *box = panel(root, 12, 92 + i * 52, 216, 44, selected ? GREEN : SOFT);
+            snprintf(text, sizeof(text), "%d  %s", i + 1, items[i]);
+            label(box, 12, 11, 192, text, selected ? 0xFFFFFF : INK);
+        }
+        line(root, 254, "前两项免手机，不断网", MUTED);
+        footer(root, "确定进入 / 长按返回");
+        return;
+    }
+    if (sw->mode == VOTE_SWITCH_CODE) {
+        line(root, 50, "输入 6 位入场码", INK);
+        for (int i = 0; i < 6; i++) {
+            bool active = i == sw->cursor;
+            int x = 14 + i * 36;
+            if (active) {
+                lv_obj_t *up = label(root, x, 80, 32, "^", GREEN);
+                lv_obj_set_style_text_align(up, LV_TEXT_ALIGN_CENTER, 0);
+                lv_obj_t *dn = label(root, x, 152, 32, "v", GREEN);
+                lv_obj_set_style_text_align(dn, LV_TEXT_ALIGN_CENTER, 0);
+            }
+            lv_obj_t *cell = panel(root, x, 102, 32, 46, active ? GREEN : SOFT);
+            char digit[2] = {sw->code[i] ? sw->code[i] : '0', 0};
+            lv_obj_t *num = label(cell, 0, 12, 32, digit, active ? 0xFFFFFF : INK);
+            lv_obj_set_style_text_align(num, LV_TEXT_ALIGN_CENTER, 0);
+        }
+        if (sw->hint[0]) {
+            label(root, 18, 184, 204, sw->hint, 0x9B632B);
+            label(root, 18, 232, 204, "上下修改  确定提交", MUTED);
+        } else {
+            label(root, 18, 186, 204, sw->cursor < 5 ? "上下调数字  确定下一位" : "上下调数字  确定加入", GREEN);
+            label(root, 18, 222, 204, "双击确定：退回上一位", MUTED);
+        }
+        footer(root, "长按确定：返回");
+        return;
+    }
+    if (sw->mode == VOTE_SWITCH_SCAN) {
+        line(root, 50, sw->open_join ? "一键加入会场" : "核对新入场码", INK);
+        lv_obj_t *box = panel(root, 12, 92, 216, 90, SOFT);
+        label(box, 12, 16, 192, sw->hint[0] ? sw->hint : "正在搜索主持台", sw->failed ? 0x9B632B : GREEN);
+        if (sw->failed) {
+            label(root, 18, 198, 204,
+                  sw->open_join ? "确定：重新搜索\n下键：改输 6 位入场码" : "确定：重新搜索\n上键：返回菜单",
+                  MUTED);
+        } else if (sw->open_join) {
+            label(root, 18, 200, 204, "请先在电脑主持台\n点击「一键入场」", MUTED);
+        }
+        footer(root, "长按确定：返回");
+        return;
+    }
+    if (sw->mode == VOTE_SWITCH_PICK) {
+        line(root, 50, sw->open_join ? "选择一键入场会场" : "选择要加入的主持台", INK);
+        int first = sw->host_index < 3 ? 0 : sw->host_index - 2;
+        for (int row = 0; row < 3 && first + row < sw->host_count; row++) {
+            int i = first + row;
+            bool selected = i == sw->host_index;
+            char tag[12];
+            format_host_tag(tag, sw->hosts[i].id);
+            lv_obj_t *box = panel(root, 12, 94 + row * 50, 216, 42, selected ? GREEN : SOFT);
+            snprintf(text, sizeof(text), "会场 %s", tag);
+            label(box, 12, 10, 192, text, selected ? 0xFFFFFF : INK);
+        }
+        snprintf(text, sizeof(text), "%d/%d  上下选择 / 确定加入", sw->host_index + 1, sw->host_count);
+        line(root, 252, text, MUTED);
+        footer(root, "长按确定：返回");
+        return;
+    }
+    line(root, 50, sw->open_join ? "一键加入会场" : "核对新入场码", INK);
+    lv_obj_t *box = panel(root, 12, 92, 216, 94, SOFT);
+    if (sw->host_index >= 0 && sw->host_index < sw->host_count) {
+        char tag[12];
+        format_host_tag(tag, sw->hosts[sw->host_index].id);
+        snprintf(text, sizeof(text), "会场 %s", tag);
+        label(box, 12, 12, 192, text, INK);
+    }
+    label(box, 12, 46, 192, sw->hint[0] ? sw->hint : "正在连接", sw->failed ? 0x9B632B : GREEN);
+    if (sw->failed) {
+        label(root, 18, 202, 204,
+              sw->open_join ? "确定：重新搜索\n下键：改输 6 位入场码" : "确定：修改入场码\n上下：返回菜单",
+              MUTED);
+    }
+    footer(root, "长按确定：返回");
+}
+
 void vote_ui_render(const vote_view_t *view)
 {
     if (!s_animation_ready) {
@@ -90,6 +192,10 @@ void vote_ui_render(const vote_view_t *view)
     lv_obj_t *battery = label(root, 170, 15, 52, text, MUTED);
     lv_obj_set_style_text_align(battery, LV_TEXT_ALIGN_RIGHT, 0);
 
+    if (view->sw.mode != VOTE_SWITCH_NONE) {
+        render_switch(root, &view->sw);
+        return;
+    }
     if (view->settings_prompt) {
         line(root, 64, "重新配置网络？", INK);
         label(root, 18, 114, 204, "旧配置会保留到新网络连接成功。", MUTED);
@@ -123,7 +229,7 @@ void vote_ui_render(const vote_view_t *view)
         snprintf(text, sizeof(text), "设备 %s", view->device + 6);
         line(root, 219, text, MUTED);
         line(root, 250, view->status, GREEN);
-        footer(root, "长按确定：配网");
+        footer(root, "长按确定：切换 / 配网");
         return;
     }
     const char *phase = poll->phase == VOTE_PUBLISHED ? "结果已公布" : poll->phase == VOTE_CLOSED ? "收票已截止" : "选择你的答案";
@@ -165,7 +271,7 @@ void vote_ui_render(const vote_view_t *view)
         const char *hint = model->confirming ? "提交后不可更改" : model->pending_choice >= 0 ? "收到确认才算成功" : "等待主持人公布结果";
         if (model->confirming && view->ballot_save_failed) hint = "未保存，请再按确定";
         line(root, 240, hint, MUTED);
-        footer(root, model->confirming ? "确定提交 / 上下返回" : "长按确定：配网");
+        footer(root, model->confirming ? "确定提交 / 上下返回" : "长按确定：切换 / 配网");
         return;
     }
     int first = model->selected < 3 ? 0 : model->selected - 2;

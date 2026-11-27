@@ -98,6 +98,31 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         finally:
             transport.close()
 
+    async def test_discovery_open_join_flag(self):
+        def probe(port, nonce):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(2)
+                sock.sendto(b"GXV2" + nonce, ("127.0.0.1", port))
+                return sock.recvfrom(64)[0]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host, runner, port = await self.start(Path(tmp) / "votes.sqlite3")
+            try:
+                nonce = b"12345678"
+                reply = await asyncio.to_thread(probe, port, nonce)
+                self.assertEqual(len(reply), 23)
+                self.assertEqual(reply[:12], b"GXH2" + nonce)
+                self.assertEqual(reply[22], 0)
+                host.set_open_join(60)
+                reply_open = await asyncio.to_thread(probe, port, nonce)
+                self.assertEqual(len(reply_open), 23)
+                self.assertEqual(reply_open[22], 1)
+                host.set_open_join(0)
+                reply_closed = await asyncio.to_thread(probe, port, nonce)
+                self.assertEqual(reply_closed[22], 0)
+            finally:
+                await runner.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

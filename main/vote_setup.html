@@ -51,43 +51,50 @@
 <script>
   const $ = id => document.getElementById(id);
   let networks = [], busy = false, finished = false, submitting = false, scans = 0;
-  let activeScan = 0, lastChoices = "";
+  let activeScan = 0, lastChoices = "", savedSsid = "", wifiTouched = false;
   function chosen() {
     const value = $("wifi").value;
-    return value !== "" && value !== "manual" ? networks[Number(value)] : null;
+    return value !== "" && value !== "manual" && value !== "keep" ? networks[Number(value)] : null;
   }
   function fields() {
-    const manual = $("wifi").value === "manual", open = chosen()?.open;
+    const val = $("wifi").value, keep = val === "keep", manual = val === "manual", open = chosen()?.open;
     $("manual-name").hidden = !manual;
     $("ssid").required = manual;
-    $("password-row").hidden = !!open;
-    $("password").required = !!chosen() && !open;
+    $("password-row").hidden = keep || !!open;
+    $("password").required = !keep && !!chosen() && !open;
     $("password").minLength = $("password").required ? 8 : 0;
     $("refresh").disabled = busy || submitting;
     $("submit").disabled = busy || submitting || finished;
   }
-  $("wifi").onchange = fields;
+  function rebuildWifiOptions(scanning) {
+    const prevVal = $("wifi").value, previous = chosen()?.ssid;
+    const opts = [];
+    if (savedSsid) opts.push(new Option("沿用当前网络：" + savedSsid, "keep"));
+    opts.push(new Option(scanning ? "正在查找附近网络…" : "请选择现场 Wi-Fi", ""));
+    networks.forEach((n, i) => opts.push(new Option(n.ssid + (n.open ? "（开放）" : ""), String(i))));
+    opts.push(new Option("手动输入网络名", "manual"));
+    $("wifi").replaceChildren(...opts);
+    if (prevVal === "manual") $("wifi").value = "manual";
+    else if (prevVal === "keep" && savedSsid) $("wifi").value = "keep";
+    else if (previous) {
+      const i = networks.findIndex(n => n.ssid === previous);
+      if (i >= 0) $("wifi").value = String(i);
+    } else if (savedSsid && !wifiTouched) $("wifi").value = "keep";
+    else if (!networks.length && !scanning && !savedSsid) $("wifi").value = "manual";
+    fields();
+  }
+  $("wifi").onchange = () => { wifiTouched = true; fields(); };
   async function scan(refresh, generation) {
     try {
       const r = await fetch("/networks" + (refresh ? "?refresh=1" : ""), {cache:"no-store"});
       if (!r.ok) throw Error();
       const data = await r.json();
       if (generation !== activeScan) return;
-      const previous = chosen()?.ssid, manual = $("wifi").value === "manual";
       networks = data.networks;
-      const placeholder = data.scanning ? "正在查找附近网络…" : "请选择现场 Wi-Fi";
-      $("wifi").replaceChildren(new Option(placeholder, ""),
-        ...networks.map((n,i) => new Option(n.ssid + (n.open ? "（开放）" : ""), String(i))),
-        new Option("手动输入网络名", "manual"));
-      if (manual) $("wifi").value = "manual";
-      else if (previous) {
-        const i = networks.findIndex(n => n.ssid === previous);
-        if (i >= 0) $("wifi").value = String(i);
-      }
+      rebuildWifiOptions(data.scanning);
       if (data.scanning && scans++ < 10) setTimeout(() => scan(false, generation), 800);
-      else if (!networks.length && !data.scanning) $("wifi").value = "manual";
     } catch {
-      if (generation === activeScan && !networks.length) $("wifi").value = "manual";
+      if (generation === activeScan && !networks.length && !savedSsid) $("wifi").value = "manual";
     }
     fields();
   }
@@ -104,13 +111,17 @@
   $("form").onsubmit = event => {
     event.preventDefault();
     if (busy || submitting || finished) return;
+    let server = $("server").value.trim();
+    if (/^[\d.]+(:\d+)?$/.test(server)) server = "ws://" + server + (server.includes(":") ? "" : ":8765") + "/ws";
+    if ($("wifi").value === "keep" && savedSsid) {
+      submit({keep_wifi:true, code:$("code").value.trim(), server});
+      return;
+    }
     const n = chosen();
     const name = n ? n.ssid : $("ssid").value;
     if (new TextEncoder().encode(name).length > 32) {
       $("status").textContent = "网络名称超过 32 字节"; return;
     }
-    let server = $("server").value.trim();
-    if (/^[\d.]+(:\d+)?$/.test(server)) server = "ws://" + server + (server.includes(":") ? "" : ":8765") + "/ws";
     submit({ssid:name, password:n?.open ? "" : $("password").value, code:$("code").value.trim(), server});
   };
   async function poll() {
@@ -118,6 +129,10 @@
       const r = await fetch("/status", {cache:"no-store"});
       if (!r.ok) throw Error();
       const s = await r.json();
+      if (typeof s.saved_ssid === "string" && s.saved_ssid && s.saved_ssid !== savedSsid) {
+        savedSsid = s.saved_ssid;
+        rebuildWifiOptions(false);
+      }
       if (!submitting) {
         busy = s.busy;
         if (s.status !== 0) $("status").textContent = s.message;

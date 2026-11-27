@@ -85,6 +85,43 @@ int main(void)
     strcpy(settings.password, "short"); assert(!vote_settings_valid(&settings));
     settings.password[0] = 0; assert(vote_settings_valid(&settings));
     memset(settings.ssid, 'a', sizeof(settings.ssid)); assert(!vote_settings_valid(&settings));
-    puts("投票状态、UTF-8、分片重组和配网校验：通过");
+
+    vote_switch_t sw;
+    vote_switch_open_menu(&sw);
+    assert(sw.mode == VOTE_SWITCH_MENU && sw.menu_index == 0);
+    assert(vote_switch_key(&sw, VOTE_DOWN, false) == VOTE_SW_ACT_NONE && sw.menu_index == 1);
+    assert(vote_switch_key(&sw, VOTE_DOWN, false) == VOTE_SW_ACT_NONE && sw.menu_index == 2);
+    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_ENTER_SETUP);
+    assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.menu_index == 1);
+    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_NONE && sw.mode == VOTE_SWITCH_CODE && !strcmp(sw.code, "000000") && sw.cursor == 0);
+    assert(vote_switch_key(&sw, VOTE_DOWN, false) == VOTE_SW_ACT_NONE && sw.code[0] == '9');
+    assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.code[0] == '0');
+    assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.code[0] == '1');
+    for (int i = 0; i < 5; i++) assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_NONE && sw.cursor == i + 1);
+    assert(vote_switch_key(&sw, VOTE_OK, true) == VOTE_SW_ACT_NONE && sw.cursor == 4);
+    assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.code[4] == '1');
+    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_NONE && sw.cursor == 5);
+    assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.code[5] == '1');
+    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_SCAN_CODE && sw.mode == VOTE_SWITCH_SCAN && !strcmp(sw.code, "100011"));
+
+    vote_switch_host_t one[1] = {{.id = "00000000abcdef12", .open_join = false}};
+    assert(vote_switch_apply_hosts(&sw, one, 1) && sw.mode == VOTE_SWITCH_JOINING && sw.host_count == 1);
+    vote_switch_host_t two[2] = {{.id = "00000000abcdef12", .open_join = false}, {.id = "00000000fedcba98", .open_join = true}};
+    assert(!vote_switch_apply_hosts(&sw, two, 2) && sw.mode == VOTE_SWITCH_PICK && sw.host_count == 2);
+    assert(vote_switch_key(&sw, VOTE_DOWN, false) == VOTE_SW_ACT_NONE && sw.host_index == 1);
+    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_JOIN_HOST && sw.mode == VOTE_SWITCH_JOINING);
+
+    vote_switch_open_menu(&sw);
+    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_SCAN_OPEN && sw.open_join && sw.mode == VOTE_SWITCH_SCAN);
+    assert(!vote_switch_apply_hosts(&sw, one, 1) && sw.failed && sw.mode == VOTE_SWITCH_SCAN);
+    assert(vote_switch_key(&sw, VOTE_DOWN, false) == VOTE_SW_ACT_NONE && sw.mode == VOTE_SWITCH_CODE && !sw.open_join);
+    assert(vote_switch_key(&sw, VOTE_OK, true) == VOTE_SW_ACT_NONE && sw.mode == VOTE_SWITCH_MENU);
+    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_SCAN_OPEN);
+    assert(!vote_switch_apply_hosts(&sw, two, 2) && sw.mode == VOTE_SWITCH_PICK && sw.host_count == 1 && !strcmp(sw.hosts[0].id, "00000000fedcba98"));
+    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_JOIN_HOST && sw.mode == VOTE_SWITCH_JOINING);
+    vote_switch_close(&sw);
+    assert(sw.mode == VOTE_SWITCH_NONE);
+
+    puts("投票状态、UTF-8、分片重组、切换入场码状态机和配网校验：通过");
     return 0;
 }

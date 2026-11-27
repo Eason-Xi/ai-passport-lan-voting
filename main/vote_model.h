@@ -8,8 +8,41 @@
 #define VOTE_TITLE_BYTES 241
 #define VOTE_OPTION_BYTES 97
 #define VOTE_MESSAGE_BYTES 2048
+#define VOTE_SWITCH_HOST_LIMIT 8
 
 typedef enum { VOTE_IDLE, VOTE_OPEN, VOTE_CLOSED, VOTE_PUBLISHED } vote_phase_t;
+typedef enum {
+    VOTE_SWITCH_NONE,
+    VOTE_SWITCH_MENU,
+    VOTE_SWITCH_CODE,
+    VOTE_SWITCH_SCAN,
+    VOTE_SWITCH_PICK,
+    VOTE_SWITCH_JOINING
+} vote_switch_mode_t;
+typedef enum {
+    VOTE_SW_ACT_NONE,
+    VOTE_SW_ACT_CLOSE,
+    VOTE_SW_ACT_SCAN_OPEN,
+    VOTE_SW_ACT_SCAN_CODE,
+    VOTE_SW_ACT_JOIN_HOST,
+    VOTE_SW_ACT_ENTER_SETUP
+} vote_switch_action_t;
+typedef struct {
+    char id[17];
+    bool open_join;
+} vote_switch_host_t;
+typedef struct {
+    vote_switch_mode_t mode;
+    int menu_index;
+    bool open_join;
+    char code[7];
+    int cursor;
+    vote_switch_host_t hosts[VOTE_SWITCH_HOST_LIMIT];
+    int host_count;
+    int host_index;
+    bool failed;
+    char hint[96];
+} vote_switch_t;
 typedef struct {
     char id[17];
     char title[VOTE_TITLE_BYTES];
@@ -51,3 +84,10 @@ bool vote_codepoint_supported(uint32_t cp);
 /* 返回 1 表示消息完成，0 表示等待，-1 表示丢弃无效或过长帧。 */
 int vote_rx_push(vote_rx_t *rx, unsigned opcode, bool fin, size_t payload,
                  size_t offset, const char *data, size_t length);
+
+void vote_switch_open_menu(vote_switch_t *sw);
+void vote_switch_open_code(vote_switch_t *sw, const char *hint);
+void vote_switch_close(vote_switch_t *sw);
+vote_switch_action_t vote_switch_key(vote_switch_t *sw, vote_key_t key, bool double_click);
+/* 应用发现到的主持台列表；返回 true 表示唯一目标已就绪、可直接连接校验。 */
+bool vote_switch_apply_hosts(vote_switch_t *sw, const vote_switch_host_t *found, int count);

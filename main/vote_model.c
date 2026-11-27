@@ -137,3 +137,198 @@ invalid:
     memset(rx, 0, sizeof(*rx));
     return -1;
 }
+
+static void switch_set_hint(vote_switch_t *sw, const char *hint)
+{
+    if (!hint || !hint[0]) {
+        sw->hint[0] = 0;
+        return;
+    }
+    size_t n = strlen(hint);
+    if (n >= sizeof(sw->hint)) n = sizeof(sw->hint) - 1;
+    memcpy(sw->hint, hint, n);
+    sw->hint[n] = 0;
+}
+
+void vote_switch_open_menu(vote_switch_t *sw)
+{
+    memset(sw, 0, sizeof(*sw));
+    sw->mode = VOTE_SWITCH_MENU;
+    memcpy(sw->code, "000000", 7);
+}
+
+void vote_switch_open_code(vote_switch_t *sw, const char *hint)
+{
+    if (strlen(sw->code) != 6 || strspn(sw->code, "0123456789") != 6) {
+        memcpy(sw->code, "000000", 7);
+    }
+    sw->mode = VOTE_SWITCH_CODE;
+    sw->open_join = false;
+    sw->cursor = 0;
+    sw->failed = hint && hint[0] != 0;
+    switch_set_hint(sw, hint);
+}
+
+void vote_switch_close(vote_switch_t *sw)
+{
+    memset(sw, 0, sizeof(*sw));
+}
+
+vote_switch_action_t vote_switch_key(vote_switch_t *sw, vote_key_t key, bool double_click)
+{
+    if (sw->mode == VOTE_SWITCH_MENU) {
+        if (key == VOTE_UP) sw->menu_index = (sw->menu_index + 2) % 3;
+        else if (key == VOTE_DOWN) sw->menu_index = (sw->menu_index + 1) % 3;
+        else {
+            if (sw->menu_index == 0) {
+                sw->open_join = true;
+                sw->mode = VOTE_SWITCH_SCAN;
+                sw->failed = false;
+                sw->host_count = 0;
+                switch_set_hint(sw, "正在搜索开放入场的主持台");
+                return VOTE_SW_ACT_SCAN_OPEN;
+            }
+            if (sw->menu_index == 1) {
+                vote_switch_open_code(sw, "");
+                return VOTE_SW_ACT_NONE;
+            }
+            return VOTE_SW_ACT_ENTER_SETUP;
+        }
+        return VOTE_SW_ACT_NONE;
+    }
+    if (sw->mode == VOTE_SWITCH_CODE) {
+        if (double_click && key == VOTE_OK) {
+            if (sw->cursor > 0) {
+                sw->cursor--;
+                sw->failed = false;
+                sw->hint[0] = 0;
+            } else {
+                sw->mode = VOTE_SWITCH_MENU;
+                sw->failed = false;
+                sw->hint[0] = 0;
+            }
+            return VOTE_SW_ACT_NONE;
+        }
+        if (key == VOTE_UP) {
+            sw->code[sw->cursor] = (char)('0' + (sw->code[sw->cursor] - '0' + 1) % 10);
+            sw->failed = false;
+            sw->hint[0] = 0;
+            return VOTE_SW_ACT_NONE;
+        }
+        if (key == VOTE_DOWN) {
+            sw->code[sw->cursor] = (char)('0' + (sw->code[sw->cursor] - '0' + 9) % 10);
+            sw->failed = false;
+            sw->hint[0] = 0;
+            return VOTE_SW_ACT_NONE;
+        }
+        if (sw->cursor < 5) {
+            sw->cursor++;
+            sw->failed = false;
+            sw->hint[0] = 0;
+            return VOTE_SW_ACT_NONE;
+        }
+        sw->open_join = false;
+        sw->mode = VOTE_SWITCH_SCAN;
+        sw->failed = false;
+        sw->host_count = 0;
+        switch_set_hint(sw, "正在寻找主持台");
+        return VOTE_SW_ACT_SCAN_CODE;
+    }
+    if (sw->mode == VOTE_SWITCH_SCAN) {
+        if (!sw->failed) return VOTE_SW_ACT_NONE;
+        if (key == VOTE_OK) {
+            sw->failed = false;
+            sw->host_count = 0;
+            switch_set_hint(sw, sw->open_join ? "正在搜索开放入场的主持台" : "正在寻找主持台");
+            return sw->open_join ? VOTE_SW_ACT_SCAN_OPEN : VOTE_SW_ACT_SCAN_CODE;
+        }
+        if (key == VOTE_DOWN && sw->open_join) {
+            vote_switch_open_code(sw, "");
+            return VOTE_SW_ACT_NONE;
+        }
+        sw->mode = VOTE_SWITCH_MENU;
+        sw->failed = false;
+        sw->hint[0] = 0;
+        return VOTE_SW_ACT_NONE;
+    }
+    if (sw->mode == VOTE_SWITCH_PICK) {
+        if (sw->host_count <= 0) {
+            sw->mode = VOTE_SWITCH_MENU;
+            return VOTE_SW_ACT_NONE;
+        }
+        if (key == VOTE_UP) sw->host_index = (sw->host_index + sw->host_count - 1) % sw->host_count;
+        else if (key == VOTE_DOWN) sw->host_index = (sw->host_index + 1) % sw->host_count;
+        else {
+            sw->mode = VOTE_SWITCH_JOINING;
+            sw->failed = false;
+            switch_set_hint(sw, sw->open_join ? "正在一键入场" : "正在核对入场码");
+            return VOTE_SW_ACT_JOIN_HOST;
+        }
+        return VOTE_SW_ACT_NONE;
+    }
+    if (sw->mode == VOTE_SWITCH_JOINING) {
+        if (!sw->failed) return VOTE_SW_ACT_NONE;
+        if (key == VOTE_OK) {
+            if (sw->open_join) {
+                sw->mode = VOTE_SWITCH_SCAN;
+                sw->failed = false;
+                sw->host_count = 0;
+                switch_set_hint(sw, "正在搜索开放入场的主持台");
+                return VOTE_SW_ACT_SCAN_OPEN;
+            }
+            vote_switch_open_code(sw, "");
+            return VOTE_SW_ACT_NONE;
+        }
+        if (key == VOTE_DOWN && sw->open_join) {
+            vote_switch_open_code(sw, "");
+            return VOTE_SW_ACT_NONE;
+        }
+        sw->mode = VOTE_SWITCH_MENU;
+        sw->failed = false;
+        sw->hint[0] = 0;
+        return VOTE_SW_ACT_NONE;
+    }
+    return VOTE_SW_ACT_NONE;
+}
+
+bool vote_switch_apply_hosts(vote_switch_t *sw, const vote_switch_host_t *found, int count)
+{
+    if (count < 0) count = 0;
+    if (count > VOTE_SWITCH_HOST_LIMIT) count = VOTE_SWITCH_HOST_LIMIT;
+    sw->host_count = 0;
+    sw->host_index = 0;
+    if (sw->open_join) {
+        for (int i = 0; i < count; i++) {
+            if (found[i].open_join && sw->host_count < VOTE_SWITCH_HOST_LIMIT) {
+                sw->hosts[sw->host_count++] = found[i];
+            }
+        }
+        if (!sw->host_count) {
+            sw->mode = VOTE_SWITCH_SCAN;
+            sw->failed = true;
+            switch_set_hint(sw, count > 0 ? "暂无开放一键入场的主持台" : "未找到主持台，请重试");
+            return false;
+        }
+        sw->mode = VOTE_SWITCH_PICK;
+        sw->failed = false;
+        switch_set_hint(sw, "");
+        return false;
+    }
+    for (int i = 0; i < count; i++) sw->hosts[sw->host_count++] = found[i];
+    if (!sw->host_count) {
+        sw->mode = VOTE_SWITCH_SCAN;
+        sw->failed = true;
+        switch_set_hint(sw, "未找到主持台，请重试");
+        return false;
+    }
+    if (sw->host_count == 1) {
+        sw->mode = VOTE_SWITCH_JOINING;
+        sw->failed = false;
+        switch_set_hint(sw, "正在核对入场码");
+        return true;
+    }
+    sw->mode = VOTE_SWITCH_PICK;
+    sw->failed = false;
+    switch_set_hint(sw, "");
+    return false;
+}

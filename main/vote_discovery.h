@@ -7,6 +7,7 @@
 typedef struct {
     char id[17];
     char uri[48];
+    bool open_join;
 } vote_host_t;
 
 typedef struct {

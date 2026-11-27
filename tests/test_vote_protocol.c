@@ -60,6 +60,22 @@ int main(int argc, char **argv)
     cJSON *literal = vote_parse_json_object("{\"text\":\"\\\\u0000\"}", 128);
     assert(literal && !strcmp(cJSON_GetObjectItem(literal, "text")->valuestring, "\\u0000"));
     cJSON_Delete(literal);
+    char extracted[7] = {0};
+    cJSON *with_code = vote_parse_json_object("{\"v\":1,\"type\":\"state\",\"poll\":null,\"join_code\":\"042918\"}", 128);
+    assert(with_code && vote_extract_join_code(with_code, extracted) && !strcmp(extracted, "042918"));
+    cJSON_Delete(with_code);
+    const char *bad_codes[] = {
+        "{\"v\":1,\"type\":\"state\",\"poll\":null}",
+        "{\"join_code\":\"12345\"}",
+        "{\"join_code\":\"1234567\"}",
+        "{\"join_code\":\"12345a\"}",
+        "{\"join_code\":123456}"
+    };
+    for (size_t i = 0; i < sizeof(bad_codes)/sizeof(bad_codes[0]); i++) {
+        cJSON *obj = vote_parse_json_object(bad_codes[i], 128);
+        assert(obj && !vote_extract_join_code(obj, extracted));
+        cJSON_Delete(obj);
+    }
     // 可把真实服务产生的 JSONL 快照交给固件同一解析器检查协议兼容性。
     if (argc > 1) {
         FILE *file = fopen(argv[1], "r"); assert(file);

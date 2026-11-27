@@ -900,5 +900,58 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 404)
         self.assertEqual((self.service.store.current()["id"], self.service.store.current()["phase"]), (current, "open"))
 
+    async def test_open_join_window_handshake_and_expiry(self):
+        # 默认关闭：普通握手不暴露入场码，一键入场被拒绝。
+        ws_normal, normal_state = await self.connect(0)
+        self.assertNotIn("join_code", normal_state)
+        await ws_normal.close()
+        ws_closed = await self.session.ws_connect(self.base.replace("http", "ws") + "/ws")
+        self.sockets.append(ws_closed)
+        await ws_closed.send_json(dict(v=1, type="hello", device_id="aabbcc000001", open_join=True))
+        rejected = await ws_closed.receive_json(timeout=3)
+        self.assertEqual(rejected["type"], "error")
+        self.assertIn("一键入场", rejected["message"])
+
+        # 非法时长与跨站请求拒绝。
+        async with self.session.post(self.base + "/api/open_join", json={"seconds": 60}) as response:
+            self.assertEqual(response.status, 403)
+        for bad in (-1, 5, 301, "60", True):
+            async with self.session.post(
+                self.base + "/api/open_join",
+                json={"seconds": bad},
+                headers={"X-Host-Nonce": self.service.admin_nonce},
+            ) as response:
+                self.assertEqual(response.status, 400)
+
+        # 开启 60 秒窗口：免输码握手通过并下发当前 6 位入场码。
+        await self.action("open_join", {"seconds": 60})
+        async with self.session.get(self.base + "/api/state") as response:
+            live = await response.json()
+            self.assertTrue(live["supports_open_join"])
+            self.assertGreater(live["open_join_remaining_ms"], 0)
+            self.assertIsNotNone(live["open_join_until_ms"])
+
+        ws_open = await self.session.ws_connect(self.base.replace("http", "ws") + "/ws")
+        self.sockets.append(ws_open)
+        await ws_open.send_json(dict(v=1, type="hello", device_id="aabbcc000002", open_join=True))
+        welcomed = await ws_open.receive_json(timeout=3)
+        self.assertEqual(welcomed["type"], "state")
+        self.assertEqual(welcomed["join_code"], self.service.store.join_code)
+        await ws_open.close()
+        await asyncio.sleep(0.03)
+
+        # 主动关闭后，一键入场再次被拒绝；但之前收到的入场码仍可正常重连。
+        await self.action("open_join", {"seconds": 0})
+        ws_rejoin, state_rejoin = await self.connect(2, welcomed["join_code"])
+        self.assertEqual(state_rejoin["type"], "state")
+        self.assertNotIn("join_code", state_rejoin)
+        await ws_rejoin.close()
+
+        ws_after = await self.session.ws_connect(self.base.replace("http", "ws") + "/ws")
+        self.sockets.append(ws_after)
+        await ws_after.send_json(dict(v=1, type="hello", device_id="aabbcc000003", open_join=True))
+        denied = await ws_after.receive_json(timeout=3)
+        self.assertEqual(denied["type"], "error")
+
 
 if __name__ == "__main__": unittest.main(verbosity=2)

@@ -45,6 +45,8 @@ FIXED_OPTIONS = {
 INSERT_OPEN_POLL = """INSERT INTO polls (id,title,options,mode,correct_choice,phase,created,deadline_at_ms,batch_id)
                       VALUES (?,?,?,?,?,'open',?,?,?)"""
 MAX_DEADLINE_MS = 253402300799999  # 公历 9999 年末的 Unix 毫秒数。
+OPEN_JOIN_DEFAULT_SECONDS = 60
+OPEN_JOIN_MAX_SECONDS = 300
 DISCOVERY_PORT = 48765
 DISCOVERY_NETWORKS = tuple(map(ipaddress.IPv4Network, ("10.0.0.0/8", "172.16.0.0/12",
                                                        "192.168.0.0/16", "169.254.0.0/16", "127.0.0.0/8")))
@@ -595,13 +597,17 @@ class HostDiscovery(asyncio.DatagramProtocol):
         self.transport = transport
 
     def datagram_received(self, message, address):
-        if len(message) != 12 or message[:4] != b"GXV1":
+        if len(message) != 12 or message[:4] not in (b"GXV1", b"GXV2"):
             return
         ip = ipaddress.IPv4Address(address[0])
         if not any(ip in network for network in DISCOVERY_NETWORKS):
             return
-        reply = b"GXH1" + message[4:] + bytes.fromhex(self.service.store.host_id)
-        self.transport.sendto(reply + self.service.port.to_bytes(2, "big"), address)
+        payload = message[4:] + bytes.fromhex(self.service.store.host_id) + self.service.port.to_bytes(2, "big")
+        if message[:4] == b"GXV1":
+            self.transport.sendto(b"GXH1" + payload, address)
+        else:
+            flags = bytes([1 if self.service.open_join_active() else 0])
+            self.transport.sendto(b"GXH2" + payload + flags, address)
 
 
 class VotingService:
@@ -617,6 +623,19 @@ class VotingService:
         self.discovery = None
         self.deadline_changed = asyncio.Event()
         self.deadline_task = None
+        self.open_join_until_ms = 0
+
+    def open_join_remaining_ms(self) -> int:
+        return max(0, self.open_join_until_ms - clock_ms())
+
+    def open_join_active(self) -> bool:
+        return self.open_join_remaining_ms() > 0
+
+    def set_open_join(self, seconds: object) -> int:
+        if type(seconds) is not int or not (seconds == 0 or 10 <= seconds <= OPEN_JOIN_MAX_SECONDS):
+            raise ValueError(f"一键入场时长须为 0（关闭）或 10～{OPEN_JOIN_MAX_SECONDS} 秒")
+        self.open_join_until_ms = 0 if seconds == 0 else clock_ms() + seconds * 1000
+        return self.open_join_until_ms
 
     async def watch_deadline(self):
         while True:
@@ -638,9 +657,11 @@ class VotingService:
                 print(f"截止时间暂时无法核对，将重试（{exc}）", flush=True)
                 await asyncio.sleep(1)
 
-    async def send_state(self, device: str, ws: web.WebSocketResponse):
+    async def send_state(self, device: str, ws: web.WebSocketResponse, extra: dict | None = None):
         try:
             state = self.store.snapshot(device, self.viewed.get(device))
+            if extra:
+                state.update(extra)
             await asyncio.wait_for(ws.send_json(state, dumps=lambda x: json.dumps(x, ensure_ascii=False)), 2)
             return True
         except (ConnectionError, RuntimeError, asyncio.TimeoutError):
@@ -664,9 +685,14 @@ class VotingService:
             data = json.loads(first.data)
             if not isinstance(data, dict) or type(data.get("v")) is not int or data.get("v") != 1 or data.get("type") != "hello":
                 raise ValueError("协议版本或握手无效")
-            code = data.get("code")
-            if not isinstance(code, str) or not code.isascii() or not secrets.compare_digest(code, self.store.join_code):
-                raise ValueError("入场码错误，请重新配网")
+            open_join = data.get("open_join") is True
+            if open_join:
+                if not self.open_join_active():
+                    raise ValueError("一键入场已关闭，请使用入场码")
+            else:
+                code = data.get("code")
+                if not isinstance(code, str) or not code.isascii() or not secrets.compare_digest(code, self.store.join_code):
+                    raise ValueError("入场码错误，长按确定可切换")
             candidate = data.get("device_id", "")
             if not isinstance(candidate, str):
                 raise ValueError("设备编号无效")
@@ -675,7 +701,7 @@ class VotingService:
             self.store.register(candidate)
             device = candidate
             self.clients[device] = ws
-            await self.send_state(device, ws)
+            await self.send_state(device, ws, {"join_code": self.store.join_code} if open_join else None)
             recent = []
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -749,7 +775,10 @@ class VotingService:
                      addresses=self.addresses, port=self.port, host_id=self.store.host_id,
                      discovery_available=self.discovery is not None, max_batch_polls=MAX_BATCH_POLLS,
                      supports_append=True, supports_modes=True, supports_question_library=True,
-                     supports_history_delete=True, history_count=history_count)
+                     supports_history_delete=True, supports_open_join=True,
+                     open_join_remaining_ms=self.open_join_remaining_ms(),
+                     open_join_until_ms=self.open_join_until_ms if self.open_join_active() else None,
+                     history_count=history_count)
         current_id = state["poll"]["id"] if state["poll"] else ""
         answered = dict(self.store.db.execute("SELECT v.device_id, COUNT(*) FROM votes v JOIN polls p ON p.id=v.poll_id "
                                                "WHERE p.batch_id=? GROUP BY v.device_id", (current_id,)))
@@ -822,11 +851,13 @@ class VotingService:
                 self.store.save_library_question(data)
             elif action == "history_delete":
                 self.store.delete_report(data.get("batch_id"))
+            elif action == "open_join":
+                self.set_open_join(data.get("seconds", OPEN_JOIN_DEFAULT_SECONDS))
             else:
                 raise ValueError("操作无效")
             if action in ("create", "create_batch", "deadline", "close", "publish"):
                 self.deadline_changed.set()
-            if action in ("alias", "device_limit", "library_save", "history_delete"):
+            if action in ("alias", "device_limit", "library_save", "history_delete", "open_join"):
                 return web.json_response({"ok": True})
             sent = await self.broadcast()
             if action in ("create", "create_batch", "append_question"):
