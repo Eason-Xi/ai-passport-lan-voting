@@ -209,6 +209,26 @@ class DesktopBridge:
         dest.write_bytes(raw)
         return True
 
+    def save_csv(self, filename: str, content: str) -> bool:
+        if self._window is None:
+            return False
+        import webview
+
+        safe_name = Path(filename or "vote-report.csv").name
+        if not safe_name.lower().endswith(".csv"):
+            safe_name += ".csv"
+        target = self._window.create_file_dialog(
+            webview.SAVE_DIALOG,
+            directory=str(Path.home() / "Desktop"),
+            save_filename=safe_name,
+            file_types=("CSV 表格 (*.csv)",),
+        )
+        if not target:
+            return False
+        dest = Path(target[0] if isinstance(target, (list, tuple)) else target)
+        dest.write_bytes(content.encode("utf-8-sig"))
+        return True
+
 
 def launch_desktop(port: int, data_path: Path, strict_port: bool = False) -> int:
     import webview

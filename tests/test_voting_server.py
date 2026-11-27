@@ -1,5 +1,7 @@
 """真实 TCP/WebSocket、十端并发、重连与持久化边界；不模拟物理无线。"""
 import asyncio
+import csv
+import io
 import json
 import sqlite3
 import sys
@@ -11,7 +13,7 @@ from pathlib import Path
 from aiohttp import ClientSession, WSMsgType, web
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "host"))
-from server import MAX_DEADLINE_MS, Store, VotingService, clock_ms
+from server import MAX_BATCH_POLLS, MAX_DEADLINE_MS, Store, VotingService, clock_ms
 
 
 class StoreTest(unittest.TestCase):
@@ -87,6 +89,97 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(self.store.snapshot("a")["poll"]["counts"], [0, 1])
 
     @patch("server.clock_ms", return_value=1_800_000_000_000)
+    def test_reports_cover_every_end_and_survive_restart(self, clock):
+        body = dict(title="活动", options=["赞成", "反对"])
+        self.store.create_batch(dict(questions=[body, dict(title="日期", options=["周六","周日"])]))
+        first, second = [p["id"] for p in self.store.snapshot()["batch"]["polls"]]
+        self.store.vote("甲", first, 1)
+        self.store.vote("乙", first, 0)
+        self.store.vote("甲", second, 1)
+        self.assertEqual(self.store.history()["reports"], [])
+        clock.return_value += 1200
+        self.store.db.execute("CREATE TRIGGER fail_report BEFORE INSERT ON poll_reports BEGIN SELECT RAISE(ABORT,'测试失败'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.transition(first, "closed")
+        self.assertEqual(self.store.current()["phase"], "open")
+        self.store.db.execute("DROP TRIGGER fail_report")
+        self.store.transition(first, "closed")
+        saved = self.store.report(first)
+        self.assertEqual((saved["participants"], saved["total_votes"], saved["ended_at_ms"]), (2, 3, clock.return_value))
+        self.assertEqual([q["counts"] for q in saved["questions"]], [[1,1], [0,1]])
+        self.assertNotIn("counts", self.store.snapshot("甲")["poll"])
+        self.store.vote("甲", first, 1)
+        clock.return_value += 8000
+        self.store.transition(first, "published")
+        self.store.transition(first, "published")
+        self.assertEqual(self.store.report(first), saved)
+        self.store.create(dict(**body, duration_seconds=3))
+        timed = self.store.current()
+        clock.return_value += 15000
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.current()["phase"], "closed")
+        self.assertEqual(self.store.report(timed["id"])["ended_at_ms"], timed["deadline_at_ms"])
+        self.assertEqual(self.store.report(timed["id"])["total_votes"], 0)
+        self.store.transition(timed["id"], "published")
+        self.store.create(body)
+        direct = self.store.current()["id"]
+        self.store.transition(direct, "published")
+        self.assertEqual(self.store.report(direct)["ended_at_ms"], clock.return_value)
+        self.assertEqual([r["id"] for r in self.store.history()["reports"]], [direct, timed["id"], first])
+        self.assertEqual(self.store.report(first), saved)
+
+    def test_backfill_and_history_pagination(self):
+        for i in range(22):
+            self.store.create(dict(title=f"旧题{i}", options=["甲", "乙"]))
+            self.store.transition(self.store.current()["id"], "published")
+        self.store.create(dict(title="仍在收票", options=["甲", "乙"]))
+        self.store.db.execute("DROP TABLE poll_reports")
+        for _ in range(2):
+            self.store.db.close()
+            self.store = Store(self.path)
+            recent = self.store.history()
+            self.assertEqual([r["title"] for r in recent["reports"]], [f"旧题{i}" for i in range(21,1,-1)])
+            older = self.store.history(recent["next_before"])
+            self.assertEqual([r["title"] for r in older["reports"]], ["旧题1", "旧题0"])
+            self.assertIsNone(older["next_before"])
+            self.assertIsNone(recent["reports"][0]["ended_at_ms"])
+            self.assertIsNone(self.store.report(self.store.current()["id"]))
+
+    @patch("server.clock_ms", return_value=1_800_000_000_000)
+    def test_append_limit_retry_deadline_and_closed_history(self, clock):
+        original = dict(title="原题", options=["甲", "乙"])
+        self.store.create_batch(dict(questions=[original] * (MAX_BATCH_POLLS - 1), duration_seconds=10))
+        batch = self.store.current()
+        added = dict(batch_id=batch["id"], question_id="a000000000000001", title="临时题", options=["是", "否"])
+        for invalid in (dict(question_id=None), dict(title="😀"), dict(options=["是","是"]), dict(batch_id="其他场次")):
+            with self.assertRaises(ValueError):
+                self.store.append_question({**added, **invalid})
+        self.store.append_question(added)
+        self.store.append_question(added)
+        polls = self.store.snapshot()["batch"]["polls"]
+        self.assertEqual(len(polls), MAX_BATCH_POLLS)
+        self.assertEqual((polls[-1]["id"], polls[-1]["deadline_at_ms"]), (added["question_id"], batch["deadline_at_ms"]))
+        other = {**added, "question_id": "a000000000000002"}
+        with self.assertRaisesRegex(ValueError, "上限"):
+            self.store.append_question(other)
+        with self.assertRaisesRegex(ValueError, "题号"):
+            self.store.append_question({**added, "title":"另一个题目"})
+        clock.return_value = batch["deadline_at_ms"]
+        with self.assertRaisesRegex(ValueError, "结束"):
+            self.store.append_question(other)
+        report = self.store.report(batch["id"])
+        self.assertEqual((report["question_count"], report["ended_at_ms"]), (MAX_BATCH_POLLS, clock.return_value))
+        self.store.append_question(added)
+        self.store.transition(batch["id"], "published")
+        with self.assertRaisesRegex(ValueError, "结束"):
+            self.store.append_question(other)
+        self.store.create(original)
+        with self.assertRaisesRegex(ValueError, "场次"):
+            self.store.append_question(added)
+        self.assertEqual(self.store.report(batch["id"]), report)
+
+    @patch("server.clock_ms", return_value=1_800_000_000_000)
     def test_edit_cancel_manual_and_invalid_deadlines(self, clock):
         now = clock.return_value
         data = dict(title="选时间", options=["是", "否"])
@@ -135,10 +228,97 @@ class StoreTest(unittest.TestCase):
                 poll = store.snapshot("a")["poll"]
                 self.assertEqual((poll["title"], poll["phase"], poll["my_choice"]), ("旧题", "open", 0))
                 self.assertNotIn("deadline_at_ms", poll)
+                migrated = store.snapshot()["poll"]
+                self.assertEqual((migrated["mode"], migrated["correct_choice"], migrated["counts"]), ("single", None, [1, 0]))
                 self.assertEqual((store.join_code, store.host_id), ("001234", "0123456789abcdef"))
             finally:
                 store.db.close()
 
+    def test_mode_validation_and_abstentions(self):
+        quiz = dict(title="哪项正确", options=["甲", "乙"], mode="quiz")
+        for invalid in (dict(mode="unknown"), dict(mode=[]), dict(), dict(correct_choice=True),
+                        dict(correct_choice=-1), dict(correct_choice=2), dict(correct_choice="1")):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.store.create({**quiz, **invalid})
+        self.assertIsNone(self.store.current())
+        self.store.create(dict(title="是否通过", mode="approval", options=["甲", "乙"]))
+        poll = self.store.snapshot()["poll"]
+        self.assertEqual(poll["options"], ["赞成", "反对", "弃权"])
+        self.store.vote("a", poll["id"], 2)
+        abstentions = self.store.snapshot()["poll"]["mode_summary"]
+        self.assertEqual(abstentions, dict(yes=0, no=0, abstain=1, approval_pct=None, passed=None))
+        self.store.vote("b", poll["id"], 0)
+        self.store.vote("c", poll["id"], 1)
+        tied = self.store.snapshot()["poll"]["mode_summary"]
+        self.assertEqual(tied, dict(yes=1, no=1, abstain=1, approval_pct=50.0, passed=False))
+        self.store.transition(poll["id"], "closed")
+        self.assertEqual(self.store.report(poll["id"])["questions"][0]["mode_summary"], tied)
+
+    def test_mode_metadata_for_legacy_report(self):
+        self.store.create(dict(title="旧版场次", options=["甲", "乙"]))
+        poll = self.store.current()["id"]
+        self.store.vote("a", poll, 1)
+        self.store.transition(poll, "published")
+        legacy = json.dumps([dict(id=poll, title="旧版场次", options=["甲", "乙"], counts=[0,1], total=1)])
+        with self.store.db:
+            self.store.db.execute("UPDATE poll_reports SET questions=? WHERE batch_id=?", (legacy, poll))
+        question = self.store.report(poll)["questions"][0]
+        self.assertEqual((question["mode"], question["correct_choice"], question["mode_summary"]), ("single", None, {}))
+        self.assertEqual(question["counts"], [0,1])
+
+    @patch("server.clock_ms", return_value=1_800_000_000_000)
+    def test_batch_atomicity_deadline_and_first_vote(self, clock):
+        questions = [dict(title=f"第{i}题", options=["是", "否"]) for i in range(1, 4)]
+        self.store.create(questions[0])
+        previous = self.store.current()["id"]
+        self.store.transition(previous, "published")
+        for group in ([], questions[:1], questions * 17, [questions[0], {"title":"坏题","options":["重复","重复"]}]):
+            with self.assertRaises(ValueError):
+                self.store.create_batch(dict(questions=group))
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM polls").fetchone()[0], 1)
+        self.store.db.execute("CREATE TRIGGER fail_batch BEFORE INSERT ON polls WHEN NEW.title='第2题' "
+                              "BEGIN SELECT RAISE(ABORT,'测试写入失败'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.create_batch(dict(questions=questions))
+        self.assertEqual(self.store.current()["id"], previous)
+        self.store.db.execute("DROP TRIGGER fail_batch")
+        body = dict(questions=questions, previous_id=previous, duration_seconds=30)
+        self.store.create_batch(body)
+        admin = self.store.snapshot()
+        group = admin["batch"]
+        ids = [q["id"] for q in group["polls"]]
+        self.assertEqual([q["title"] for q in group["polls"]], [q["title"] for q in questions])
+        self.assertEqual(len(set(ids)), 3)
+        self.assertEqual(ids[0],group["id"])
+        self.assertTrue(all(q["remaining_ms"] == 30000 for q in group["polls"]))
+        with self.assertRaises(ValueError): self.store.create_batch(body)
+        self.store.vote("a", ids[0], 1)
+        self.store.vote("a", ids[0], 1)
+        with self.assertRaisesRegex(ValueError,"锁定"): self.store.vote("a", ids[0], 0)
+        self.assertEqual(self.store.snapshot("a")["poll"]["id"], ids[1])
+        self.assertEqual(self.store.snapshot("b")["poll"]["id"], ids[0])
+        self.assertEqual(self.store.snapshot("b",ids[2])["poll"]["id"], ids[0])
+        with self.assertRaisesRegex(ValueError,"上一题"): self.store.vote("b", ids[1], 0)
+        self.store.change_deadline(dict(poll_id=ids[0], duration_seconds=90))
+        self.store.db.close()
+        self.store = Store(self.path)
+        clock.return_value += 89999
+        self.store.vote("a", ids[1], 0)
+        self.assertTrue(all(q["remaining_ms"] == 1 for q in self.store.snapshot()["batch"]["polls"]))
+        clock.return_value += 1
+        with self.assertRaisesRegex(ValueError,"截止"): self.store.vote("b", ids[2], 1)
+        self.store.vote("a", ids[0], 1)
+        for q in self.store.snapshot()["batch"]["polls"]: self.assertEqual(q["phase"], "closed")
+        for pid in ids:
+            wire = self.store.snapshot("b",pid)
+            self.assertNotIn("batch",wire)
+            self.assertNotIn("counts",wire["poll"])
+            self.assertNotIn("total",wire["poll"])
+        self.store.transition(ids[0],"published")
+        self.assertEqual([q["counts"] for q in self.store.snapshot()["batch"]["polls"]], [[0,1],[1,0],[0,0]])
+        with self.assertRaisesRegex(ValueError,"变更"): self.store.create_batch(body)
+        self.store.create(dict(title="新题", options=["是","否"]))
+        with self.assertRaisesRegex(ValueError,"变更"): self.store.vote("a", ids[2], 0)
 
 class NetworkTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -175,12 +355,254 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
                                     headers={"X-Host-Nonce":self.service.admin_nonce}) as response:
             data = await response.json()
             self.assertEqual(response.status, 200, data)
+            return data
 
     async def receive_until(self, ws, predicate):
         for _ in range(40):
             data = await ws.receive_json(timeout=3)
             if predicate(data): return data
         self.fail("未收到目标消息")
+
+    async def test_maximum_batch_fits_single_device_frame(self):
+        ws, _ = await self.connect(0)
+        question = dict(title="题" * 60, options=[str(i) + "字" * 23 for i in range(6)])
+        await self.action("create_batch", {"questions": [question] * MAX_BATCH_POLLS})
+        packet = await ws.receive_str(timeout=3)
+        self.assertLess(len(packet.encode()), 2048)
+        state = json.loads(packet)
+        self.assertEqual(state["poll"]["batch"], {"index": 1, "count": MAX_BATCH_POLLS, "answered": 0})
+        self.assertNotIn("batch", state)
+        self.assertEqual(len(self.service.store.snapshot()["batch"]["polls"]), MAX_BATCH_POLLS)
+
+    async def test_push_ready_voters_and_saved_csv(self):
+        clients = [(await self.connect(i))[0] for i in range(10)]
+        result = await self.action("create", dict(title="=选择", options=["甲,乙", "@是"]))
+        self.assertEqual(result["pushed_to"], 10)
+        packets = await asyncio.gather(*(ws.receive_json(timeout=2) for ws in clients))
+        for packet in packets:
+            self.assertEqual((packet["poll"]["phase"], packet["poll"]["title"], packet["poll"]["options"]),
+                             ("open", "=选择", ["甲,乙", "@是"]))
+        poll_id = packets[0]["poll"]["id"]
+        url = self.base + "/api/history/" + poll_id
+        async with self.session.get(url) as response:
+            self.assertEqual(response.status, 404)
+        await clients[0].send_json(dict(v=1, type="vote", poll_id=poll_id, choice=1))
+        await self.receive_until(clients[0], lambda d: d["poll"]["my_choice"] == 1)
+        await self.action("close", dict(poll_id=poll_id))
+        async with self.session.get(self.base + "/api/history") as response:
+            self.assertEqual((await response.json())["reports"][0]["id"], poll_id)
+        async with self.session.get(url) as response:
+            self.assertEqual((await response.json())["questions"][0]["counts"], [0,1])
+        async with self.session.get(url + "/csv") as response:
+            self.assertIn("attachment", response.headers["Content-Disposition"])
+            rows = list(csv.reader(io.StringIO((await response.read()).decode("utf-8-sig"))))
+        self.assertEqual(rows[1][5:11], ["'=选择","1","A","甲,乙","0","0.0%"])
+        self.assertEqual(rows[2][5:11], ["'=选择","1","B","'@是","1","100.0%"])
+        self.assertEqual(rows[0][11:], ["投票模式", "正确选项", "模式统计"])
+        self.assertEqual(rows[1][11:], ["普通单选", "", ""])
+        for path in ("/api/history", "/api/history/"+poll_id, "/api/history/"+poll_id+"/csv"):
+            async with self.session.get(self.base+path, headers={"Host":"untrusted.example"}) as response:
+                self.assertEqual(response.status, 403)
+
+    async def test_mixed_modes_keep_hardware_protocol_and_persist_reports(self):
+        voters = [(await self.connect(i))[0] for i in range(4)]
+        await self.action("create_batch", dict(questions=[
+            dict(title="地点", options=["公园", "车站"]),
+            dict(title="是否通过", mode="approval"),
+            dict(title="活动评分", mode="rating"),
+        ]))
+        anchor = self.service.store.current()["id"]
+        quiz = dict(batch_id=anchor, question_id="a000000000000005", title="什么季节",
+                    options=["夏天", "冬天"], mode="quiz", correct_choice=1)
+        await self.action("append_question", quiz)
+        await self.action("append_question", quiz)
+        async with self.session.post(self.base + "/api/append_question", json={**quiz, "correct_choice":0},
+                                     headers={"X-Host-Nonce":self.service.admin_nonce}) as response:
+            self.assertEqual(response.status, 400)
+        async with self.session.get(self.base + "/api/state") as response:
+            admin = await response.json()
+        self.assertTrue(admin["supports_modes"])
+        polls = admin["batch"]["polls"]
+        self.assertEqual([p["mode"] for p in polls], ["single", "approval", "rating", "quiz"])
+        self.assertEqual([p["correct_choice"] for p in polls], [None, None, None, 1])
+        self.assertEqual(polls[1]["options"], ["赞成", "反对", "弃权"])
+        self.assertEqual(polls[2]["options"], [f"{i} 分" for i in range(1, 6)])
+        self.assertIsNone(polls[2]["mode_summary"]["average"])
+        self.assertIsNone(polls[3]["mode_summary"]["correct_pct"])
+        choices = [(0,0,0,1), (1,0,2,1), (1,1,3,0), (1,2,4,0)]
+        protocol_packets = []
+
+        async def vote_round(ws, ballot):
+            for question, choice in zip(polls, ballot):
+                packet = await self.receive_until(ws, lambda m: m["type"] == "state"
+                    and m["poll"]["id"] == question["id"] and m["poll"]["batch"]["count"] == 4)
+                poll = packet["poll"]
+                self.assertEqual(packet["v"], 1)
+                self.assertEqual(poll["options"], question["options"])
+                self.assertTrue({"mode", "correct_choice", "mode_summary", "counts", "total"}.isdisjoint(poll))
+                if ws is voters[0]:
+                    protocol_packets.append(packet)
+                await ws.send_json(dict(v=1, type="vote", poll_id=question["id"], choice=choice))
+            await self.receive_until(ws, lambda m: m["poll"]["batch"]["answered"] == 4)
+
+        await asyncio.gather(*(vote_round(ws, ballot) for ws, ballot in zip(voters, choices)))
+        await self.action("close", dict(poll_id=anchor))
+        url = self.base + "/api/history/" + anchor
+        async with self.session.get(url) as response:
+            saved = await response.json()
+        self.assertEqual((saved["participants"], saved["total_votes"], saved["question_count"]), (4,16,4))
+        single, approval, rating, quiz_result = saved["questions"]
+        self.assertEqual(single["counts"], [1,3])
+        self.assertEqual(approval["counts"], [2,1,1])
+        self.assertTrue(approval["mode_summary"]["passed"])
+        self.assertAlmostEqual(approval["mode_summary"]["approval_pct"], 100 * 2/3, delta=0.05)
+        self.assertEqual(rating["mode_summary"]["average"], 3.25)
+        self.assertEqual(quiz_result["mode_summary"], dict(correct_count=2, correct_pct=50.0))
+        self.assertEqual(quiz_result["correct_choice"], 1)
+        async with self.session.get(url + "/csv") as response:
+            rows = list(csv.DictReader(io.StringIO((await response.read()).decode("utf-8-sig"))))
+        first_options = {row["题目"]:row for row in rows if row["选项编号"] == "A"}
+        self.assertEqual(first_options["是否通过"]["投票模式"], "赞成 / 反对 / 弃权")
+        self.assertIn("66.7%", first_options["是否通过"]["模式统计"])
+        self.assertIn("3.25", first_options["活动评分"]["模式统计"])
+        self.assertEqual(first_options["什么季节"]["正确选项"], "B")
+        self.assertIn("50.0%", first_options["什么季节"]["模式统计"])
+        await self.action("publish", dict(poll_id=anchor))
+        await self.action("show_result", dict(batch_id=anchor, poll_id=quiz["question_id"]))
+        packet = await self.receive_until(voters[0], lambda m: m["poll"]["id"] == quiz["question_id"]
+                                          and m["poll"]["phase"] == "published")
+        self.assertEqual(packet["poll"]["counts"], [2,2])
+        self.assertTrue({"mode", "correct_choice", "mode_summary"}.isdisjoint(packet["poll"]))
+        protocol_packets.append(packet)
+        await asyncio.gather(*(ws.close() for ws in voters))
+        await self.runner.cleanup()
+        self.service = VotingService(self.path, discovery_port=0)
+        await self.start_server()
+        async with self.session.get(self.base + "/api/history/" + anchor) as response:
+            self.assertEqual(await response.json(), saved)
+        out = Path(__file__).resolve().parents[1] / "build" / "vote-modes-wire.jsonl"
+        out.parent.mkdir(exist_ok=True)
+        out.write_text("".join(json.dumps(packet, ensure_ascii=False) + "\n" for packet in protocol_packets), encoding="utf-8")
+
+    async def test_append_during_voting_pushes_personal_next_question(self):
+        fast, _ = await self.connect(0)
+        slow, _ = await self.connect(1)
+        await self.action("create", dict(title="集合地点", options=["学校", "广场"], duration_seconds=180))
+        first = (await fast.receive_json(timeout=2))["poll"]["id"]
+        await fast.send_json(dict(v=1, type="vote", poll_id=first, choice=0))
+        await self.receive_until(fast, lambda msg: msg["poll"]["my_choice"] == 0)
+        second = "a000000000000002"
+        body = dict(batch_id=first, question_id=second, title="如何前往", options=["步行", "骑车"])
+        replies = await asyncio.gather(self.action("append_question", body), self.action("append_question", body))
+        self.assertTrue(all(r["pushed_to"] == 2 for r in replies))
+        wire = []
+        async def expect(ws, pid, answered, count):
+            packet = await self.receive_until(ws, lambda m: m["type"] == "state" and m["poll"]["id"] == pid and
+                        m["poll"].get("batch", {}).get("answered") == answered and m["poll"]["batch"]["count"] == count)
+            self.assertNotIn("counts", packet["poll"])
+            wire.append(packet)
+        await expect(fast, second, 1, 2)
+        await expect(slow, first, 0, 2)
+        await fast.send_json(dict(v=1, type="vote", poll_id=second, choice=1))
+        await expect(fast, second, 2, 2)
+        third = "a000000000000003"
+        await self.action("append_question", {**body, "question_id":third, "title":"一起用餐吗"})
+        await expect(fast, third, 2, 3)
+        await slow.send_json(dict(v=1, type="vote", poll_id=first, choice=1))
+        await expect(slow, second, 1, 3)
+        await asyncio.gather(*(s.close() for s in self.sockets))
+        await self.runner.cleanup()
+        self.service = VotingService(self.path, discovery_port=0)
+        await self.start_server()
+        _, resumed = await self.connect(1)
+        self.assertEqual((resumed["poll"]["id"],resumed["poll"]["batch"]["answered"]), (second,1))
+        wire.append(resumed)
+        await self.action("close", dict(poll_id=first))
+        report = self.service.store.report(first)
+        self.assertEqual((report["participants"],report["total_votes"]), (2,3))
+        self.assertEqual([q["counts"] for q in report["questions"]], [[1,1], [0,1], [0,0]])
+        out = Path(__file__).resolve().parents[1] / "build" / "vote-append-wire.jsonl"
+        out.parent.mkdir(exist_ok=True)
+        out.write_text("".join(json.dumps(p, ensure_ascii=False) + "\n" for p in wire))
+
+    async def test_batch_independent_progress_reconnect_and_results(self):
+        fast, _ = await self.connect(0)
+        slow, _ = await self.connect(1)
+        await self.action("create_batch",dict(questions=[
+            dict(title=title,options=["是","否"]) for title in ("第一题","第二题","第三题")], duration_seconds=60))
+        polls = self.service.store.snapshot()["batch"]["polls"]
+        a,b,c = [q["id"] for q in polls]
+        wire = []
+        async def expect(ws, pid, count, phase="open"):
+            packet = await self.receive_until(ws, lambda d: d["type"] == "state" and d["poll"]["id"] == pid
+                                              and d["poll"]["phase"] == phase and d["poll"]["batch"]["answered"] == count)
+            wire.append(packet)
+            if phase != "published":
+                self.assertNotIn("counts",packet["poll"])
+                self.assertNotIn("total",packet["poll"])
+            return packet["poll"]
+        async def cast(ws, pid, choice):
+            await ws.send_json(dict(v=1,type="vote",poll_id=pid,choice=choice))
+        await expect(fast,a,0)
+        await expect(slow,a,0)
+        await cast(fast,a,1)
+        await expect(slow,a,0)
+        # 快设备未读取确认便断开；记录已落库，重连时直接拿到第二题。
+        await fast.close()
+        await asyncio.sleep(.03)
+        fast, restored = await self.connect(0)
+        self.assertEqual((restored["poll"]["id"],restored["poll"]["batch"]["answered"]), (b,1))
+        wire.append(restored)
+        await cast(fast,a,1)
+        await expect(fast,b,1)
+        await cast(fast,b,0)
+        await expect(fast,c,2)
+        await cast(fast,c,1)
+        last = await expect(fast,c,3)
+        self.assertEqual(last["my_choice"],1)
+        await cast(slow,a,0)
+        await expect(slow,b,1)
+        async with self.session.get(self.base+"/api/state") as response:
+            admin = await response.json()
+        self.assertEqual([q["total"] for q in admin["batch"]["polls"]],[2,1,1])
+        self.assertEqual([(d["answered"],d["voted"]) for d in admin["devices"]],[(3,True),(1,False)])
+        await self.action("deadline",dict(poll_id=a,deadline_at_ms=clock_ms()+350))
+        await expect(slow,b,1,"closed")
+        await cast(slow,b,0)
+        error = await self.receive_until(slow,lambda d:d["type"]=="error")
+        self.assertIn("截止",error["message"])
+        await self.action("publish",dict(poll_id=a))
+        published = await expect(fast,a,3,"published")
+        self.assertEqual(published["counts"],[1,1])
+        await fast.send_json(dict(v=1,type="view",poll_id=published["batch"]["next"]))
+        self.assertEqual((await expect(fast,b,3,"published"))["counts"],[1,0])
+        # 公布后收到旧票重试，既不重复计数，也不打断本机正在翻看的结果。
+        await cast(fast,a,1)
+        self.assertEqual((await expect(fast,b,3,"published"))["counts"],[1,0])
+        await self.action("show_result",dict(batch_id=a,poll_id=c))
+        self.assertEqual((await expect(slow,c,1,"published"))["counts"],[0,1])
+        await asyncio.gather(*(s.close() for s in self.sockets))
+        await self.runner.cleanup()
+        self.service = VotingService(self.path, discovery_port=0)
+        await self.start_server()
+        _, restored = await self.connect(1)
+        self.assertEqual((restored["poll"]["id"],restored["poll"]["batch"]["answered"]), (c,1))
+        wire.append(restored)
+        out = Path(__file__).resolve().parents[1] / "build" / "vote-batch-wire.jsonl"
+        out.parent.mkdir(exist_ok=True)
+        out.write_text("".join(json.dumps(p,ensure_ascii=False,separators=(",",":"))+"\n" for p in wire))
+
+    async def test_ten_voters_complete_the_same_batch(self):
+        clients = [(await self.connect(i))[0] for i in range(10)]
+        await self.action("create_batch",dict(questions=[dict(title=f"题{i}",options=["是","否"]) for i in range(3)]))
+        polls = self.service.store.snapshot()["batch"]["polls"]
+        async def answer(index, ws):
+            for i, poll in enumerate(polls):
+                await self.receive_until(ws,lambda d: d["poll"]["id"] == poll["id"] and d["poll"]["batch"]["answered"] == i)
+                await ws.send_json(dict(v=1,type="vote",poll_id=poll["id"],choice=(i+index)%2))
+            await self.receive_until(ws,lambda d:d["poll"]["batch"]["answered"] == 3)
+        await asyncio.gather(*(answer(i,ws) for i,ws in enumerate(clients)))
+        self.assertEqual([q["counts"] for q in self.service.store.snapshot()["batch"]["polls"]],[[5,5]]*3)
 
     async def test_idle_expiry_push_and_offline_voter(self):
         ws, _ = await self.connect(0)
@@ -306,7 +728,7 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
         await self.action("alias", dict(device_id="aabbcc000000", alias="1号评委"))
         async with self.session.get(self.base + "/api/state") as response:
             state = await response.json()
-            self.assertEqual(state["history_count"], 2)
+            self.assertEqual(state["history_count"], 1)
             self.assertEqual(state["devices"][0]["alias"], "1号评委")
         await self.action("alias", dict(device_id="aabbcc000000", alias="   "))
         async with self.session.get(self.base + "/api/state") as response:
@@ -320,10 +742,9 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 400)
         async with self.session.get(self.base + "/api/history") as response:
             self.assertEqual(response.status, 200)
-            history = (await response.json())["polls"]
-            self.assertEqual([item["title"] for item in history], ["第二题", "第一题"])
-            self.assertEqual(history[1]["counts"], [1, 0])
-            self.assertEqual(history[1]["total"], 1)
+            reports = (await response.json())["reports"]
+            self.assertEqual([item["title"] for item in reports], ["第一题"])
+            self.assertEqual(reports[0]["total_votes"], 1)
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)

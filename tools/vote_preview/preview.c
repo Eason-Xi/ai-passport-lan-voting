@@ -123,5 +123,17 @@ int main(int argc, char **argv)
     vote_model_apply(&view.model, &poll);
     view.model.confirming = true; view.ballot_save_failed = true;
     capture("17-storage-retry");
+    view.model.confirming = false; view.ballot_save_failed = false;
+    poll = (vote_snapshot_t){.id="0123456789abcde2", .title="下次活动安排在哪天？",
+        .options={"周六", "周日", "都可以"}, .option_count=3, .phase=VOTE_OPEN, .my_choice=-1,
+        .batch_count=3, .batch_index=2, .answered=1};
+    view.battery = 87;
+    vote_model_apply(&view.model, &poll); seconds_left = 58; capture("21-batch-question");
+    poll = (vote_snapshot_t){.id="0123456789abcde3", .title="是否参加集体午餐？",
+        .options={"参加", "暂不参加"}, .option_count=2, .phase=VOTE_OPEN, .my_choice=0,
+        .batch_count=3, .batch_index=3, .answered=3};
+    vote_model_apply(&view.model, &poll); capture("22-batch-complete");
+    poll.phase = VOTE_PUBLISHED; poll.counts[0] = 6; poll.counts[1] = 4; poll.total = 10; seconds_left = -1;
+    vote_model_apply(&view.model, &poll); capture("23-batch-results");
     return 0;
 }

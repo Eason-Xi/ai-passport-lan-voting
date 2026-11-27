@@ -445,6 +445,14 @@ static void send_text(const char *text)
     if (sent != length) ESP_LOGW(TAG, "发送未完成，等待重连或幂等重试");
 }
 
+void vote_net_view_question(const char *poll_id)
+{
+    if (!s_ws || !s_hello || !poll_id[0]) return;
+    char message[80];
+    snprintf(message, sizeof(message), "{\"v\":1,\"type\":\"view\",\"poll_id\":\"%.16s\"}", poll_id);
+    send_text(message);
+}
+
 static void stop_ws(void)
 {
     if (s_ws) esp_websocket_client_destroy(s_ws);

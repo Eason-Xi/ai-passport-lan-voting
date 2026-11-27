@@ -59,7 +59,7 @@
             </svg>
             <span>浏览器</span>
           </button>
-          <button type="button" class="icon-btn" id="btn-history">
+          <a class="icon-btn history-nav" href="#history">
             <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
               <path
                 d="M4.5 10a5.5 5.5 0 1 0 1.4-3.7M4.5 4.5v2.8h2.8M10 6.8V10l2.2 1.4"
@@ -69,9 +69,9 @@
                 stroke-linejoin="round"
               />
             </svg>
-            <span>历史记录</span>
+            <span>投票历史</span>
             <em class="count-chip" id="history-count" hidden>0</em>
-          </button>
+          </a>
           <button
             type="button"
             class="icon-btn stage-trigger"
@@ -139,7 +139,7 @@
           </div>
           <div class="metric-card">
             <div class="metric-top">
-              <span>本题已收票</span>
+              <span id="votes-label">本题已收票</span>
               <small id="turnout-rate">等待收票</small>
             </div>
             <strong><b id="votes">0</b><small> 票</small></strong>
@@ -162,69 +162,47 @@
         <section class="panel editor">
           <div class="panel-heading">
             <div>
-              <h2>新建投票</h2>
-              <p class="panel-sub">题目与选项会同步下发到所有在线投票器</p>
+              <h2 id="editor-title">新建投票</h2>
+              <p class="panel-sub" id="editor-sub">支持单题或一次最多 50 题批量发起，可混用 4 种投票模式</p>
             </div>
-            <span class="pill">单选 · 首票锁定</span>
-          </div>
-
-          <div class="presets" aria-label="快捷选项模板">
-            <span class="presets-label">快捷模板</span>
-            <button type="button" class="preset-chip" data-preset="agree">
-              赞成 / 反对 / 弃权
-            </button>
-            <button type="button" class="preset-chip" data-preset="satisfy">
-              满意度四档
-            </button>
-            <button type="button" class="preset-chip" data-preset="yesno">
-              是 / 否
-            </button>
-            <button type="button" class="preset-chip ghost" data-preset="clear">
-              清空
-            </button>
+            <span class="pill">首票锁定</span>
           </div>
 
           <form id="poll-form">
-            <label for="question"
-              >投票题目<span id="question-count">0 / 60</span></label
-            >
-            <textarea
-              id="question"
-              maxlength="60"
-              rows="2"
-              required
-              placeholder="例如：周末团建，你更想去哪里？"
-            ></textarea>
-
-            <div class="option-heading">
-              <label>投票选项 <small>2～6 项，每项最多 24 字</small></label>
-              <button type="button" class="text-button" id="add-option">
-                ＋ 添加选项
-              </button>
-            </div>
-            <div id="options"></div>
-
-            <div class="font-warn" id="font-warn" hidden>
-              <strong>发现投票器字库暂不支持的字符：</strong>
-              <span id="font-warn-chars"></span>
-              <small>请替换为常用简体汉字、英文或标准标点后再发起。</small>
-            </div>
-
+            <div id="questions"></div>
+            <button type="button" class="secondary add-question-btn" id="add-question">
+              ＋ 添加题目
+            </button>
             <p class="help">
-              支持 6,994 个常用简体汉字、英文与标点；在末尾选项按 Enter 可快捷新增。
+              支持 6,994 个常用简体汉字、英文与标点；超出设备字库的字符会实时标出。
             </p>
             <div class="deadline-fields" id="new-deadline"></div>
+            <p class="help" id="batch-deadline-note" hidden></p>
             <p class="help" id="deadline-upgrade" hidden>
               当前主持服务仅支持手动截止。用原数据库重启新版服务即可定时收票。
             </p>
-            <button class="primary" id="start" type="submit">
-              <span>发起投票</span>
-              <span class="btn-arrow" aria-hidden="true">↗</span>
-            </button>
+            <button class="primary" id="start" type="submit">发起投票</button>
             <p class="form-note" id="form-note">
-              发起后，题目将同步到所有在线投票器。
+              发起后将推送到在线投票器，收票期间可继续追加题目。
             </p>
           </form>
+
+          <form id="append-form" hidden>
+            <p class="append-banner" id="append-note"></p>
+            <div id="append-question"></div>
+            <button type="button" class="secondary full-btn" id="use-append-draft" hidden>
+              将草稿用于当前场次
+            </button>
+            <button type="submit" class="primary full-btn" id="append-submit">
+              追加并推送
+            </button>
+          </form>
+
+          <div class="editor-mode-row">
+            <button type="button" class="text-button" id="editor-mode" hidden>
+              准备下一场投票
+            </button>
+          </div>
         </section>
 
         <section class="panel live">
@@ -233,9 +211,7 @@
               <h2>实时计票</h2>
               <p class="panel-sub" id="live-sub">收票过程仅主持人可见，公布后同步全员</p>
             </div>
-            <div class="heading-tools">
-              <span class="pill" id="live-badge">等待开始</span>
-            </div>
+            <span class="pill" id="live-badge">等待开始</span>
           </div>
 
           <div id="empty">
@@ -272,18 +248,23 @@
               </svg>
             </div>
             <h3>尚未发起投票</h3>
-            <p>在左侧填写题目与选项（或点击快捷模板），即可一键下发至投票器。</p>
+            <p>填写题目与选项（或选择表决/评分/测验模式）后即可发起。</p>
           </div>
 
           <div id="live-poll" hidden>
+            <label id="batch-picker" for="live-question" class="batch-picker" hidden>
+              <span>查看题目</span>
+              <select id="live-question"></select>
+            </label>
+
             <div class="live-title-row">
               <h3 id="live-title"></h3>
-              <div class="live-export-tools" id="live-export-tools">
+              <div class="live-export-tools">
                 <button
                   type="button"
                   class="mini-tool"
                   id="btn-copy-result"
-                  title="复制文字统计"
+                  title="复制本题文字统计"
                 >
                   复制文字
                 </button>
@@ -291,7 +272,7 @@
                   type="button"
                   class="mini-tool"
                   id="btn-export-png"
-                  title="导出高清结果图片"
+                  title="导出本题高清结果图片"
                 >
                   导出图片
                 </button>
@@ -300,12 +281,8 @@
             <p id="result-caption">票数仅主持人可见，公布后同步到投票器。</p>
 
             <div class="deadline-status" id="deadline-box">
-              <div class="deadline-row">
-                <div>
-                  <strong id="time-left"></strong>
-                  <span id="deadline-time"></span>
-                </div>
-              </div>
+              <strong id="time-left"></strong>
+              <span id="deadline-time"></span>
               <div class="deadline-bar-track" id="deadline-bar-track" hidden>
                 <div class="deadline-bar-fill" id="deadline-bar-fill"></div>
               </div>
@@ -320,20 +297,27 @@
               </details>
             </div>
 
-            <div class="turnout-strip" id="turnout-strip">
+            <p id="live-result-summary" class="mode-result" hidden></p>
+
+            <div class="turnout-strip">
               <span id="turnout-label">参与进度</span>
               <strong id="turnout-detail">0 / 0</strong>
             </div>
 
             <div id="results"></div>
 
+            <div class="live-links-row">
+              <a id="current-report" class="report-link" href="#history" hidden>
+                本场统计已保存，查看统计
+              </a>
+              <button id="show-result" class="secondary full-btn" type="button" hidden>
+                在投票器上展示本题
+              </button>
+            </div>
+
             <div class="actions">
-              <button id="close" class="secondary" type="button">
-                截止收票
-              </button>
-              <button id="publish" class="primary" type="button">
-                公布结果
-              </button>
+              <button id="close" class="secondary" type="button">截止收票</button>
+              <button id="publish" class="primary" type="button">公布结果</button>
             </div>
           </div>
         </section>
@@ -343,7 +327,7 @@
         <div class="panel-heading">
           <div>
             <h2>参与设备</h2>
-            <p class="panel-sub">点击设备卡片上的备注按钮可自定义席位或评委名称</p>
+            <p class="panel-sub">实时显示每台投票器在线与答题进度，可点击铅笔按钮自定义席位备注名</p>
           </div>
           <span id="device-count" class="pill">0 台已登记</span>
         </div>
@@ -360,14 +344,27 @@
             <summary>手动连接或使用旧版投票器</summary>
             <div class="address-box">
               <code id="server-address">正在读取本机局域网地址…</code>
-              <button type="button" class="mini-tool" id="copy-address">
-                复制地址
-              </button>
+              <button type="button" class="mini-tool" id="copy-address">复制地址</button>
             </div>
           </details>
         </div>
 
         <div id="device-list"></div>
+      </section>
+
+      <section class="panel history" id="history" aria-labelledby="history-title">
+        <div class="panel-heading">
+          <div>
+            <h2 id="history-title">投票历史</h2>
+            <p class="panel-sub">收票结束即自动归档至本地数据库，可随时回看、复用出题、导出 CSV 或 PNG 战报图</p>
+          </div>
+        </div>
+        <p class="help" id="history-status" aria-live="polite">正在读取已保存的统计…</p>
+        <div id="history-list"></div>
+        <div class="history-footer-actions">
+          <button type="button" class="secondary" id="history-more" hidden>查看更早的投票</button>
+          <button type="button" class="text-button" id="history-retry" hidden>重新加载统计</button>
+        </div>
       </section>
 
       <footer>
@@ -408,15 +405,9 @@
           </div>
         </div>
         <div class="stage-tools">
-          <button type="button" class="stage-btn" id="stage-toggle-theme">
-            浅色展板
-          </button>
-          <button type="button" class="stage-btn" id="stage-toggle-mask">
-            隐藏实时票数
-          </button>
-          <button type="button" class="stage-btn exit" id="stage-exit">
-            退出大屏
-          </button>
+          <button type="button" class="stage-btn" id="stage-toggle-theme">浅色展板</button>
+          <button type="button" class="stage-btn" id="stage-toggle-mask">隐藏实时票数</button>
+          <button type="button" class="stage-btn exit" id="stage-exit">退出大屏</button>
         </div>
       </div>
 
@@ -429,59 +420,76 @@
 
         <div id="stage-content" class="stage-content" hidden>
           <div class="stage-header-block">
-            <div class="stage-countdown" id="stage-countdown" hidden>
-              <span id="stage-time-left"></span>
-              <small id="stage-deadline-at"></small>
+            <div class="stage-badges">
+              <span class="stage-batch-tag" id="stage-batch-tag" hidden></span>
+              <div class="stage-countdown" id="stage-countdown" hidden>
+                <span id="stage-time-left"></span>
+                <small id="stage-deadline-at"></small>
+              </div>
             </div>
             <h2 id="stage-title"></h2>
             <p class="stage-subtitle" id="stage-subtitle"></p>
+            <p class="stage-mode-result" id="stage-mode-result" hidden></p>
           </div>
           <div id="stage-results" class="stage-results"></div>
         </div>
       </div>
 
       <div class="stage-dock">
-        <button type="button" class="stage-dock-btn" id="stage-close">
-          停止收票
-        </button>
-        <button type="button" class="stage-dock-btn primary" id="stage-publish">
-          揭晓并公布结果
-        </button>
-        <button type="button" class="stage-dock-btn" id="stage-export">
-          导出结果图
-        </button>
+        <button type="button" class="stage-dock-btn" id="stage-prev" hidden>上一题</button>
+        <button type="button" class="stage-dock-btn" id="stage-next" hidden>下一题</button>
+        <button type="button" class="stage-dock-btn" id="stage-close">停止收票</button>
+        <button type="button" class="stage-dock-btn primary" id="stage-publish">揭晓并公布结果</button>
+        <button type="button" class="stage-dock-btn" id="stage-export">导出结果图</button>
       </div>
     </div>
 
-    <!-- 历史投票记录抽屉 -->
-    <div id="history-backdrop" class="drawer-backdrop" hidden></div>
-    <aside
-      id="history-drawer"
-      class="drawer"
-      role="dialog"
-      aria-modal="true"
-      aria-label="本场历史投票记录"
-      hidden
-    >
-      <div class="drawer-head">
-        <div>
-          <h2>历史投票记录</h2>
-          <p>本场数据库中的所有题目与统计，可随时导出或一键复用</p>
-        </div>
-        <button
-          type="button"
-          class="drawer-close"
-          id="history-close"
-          aria-label="关闭历史记录"
-        >
-          ×
-        </button>
-      </div>
-      <div id="history-list" class="drawer-body"></div>
-    </aside>
-
-    <!-- 轻量浮动反馈（不占用 role="status" 以保持表单提示语义纯粹） -->
     <div id="toast" class="toast" aria-live="polite" hidden></div>
+
+    <template id="question-template">
+      <fieldset class="draft-question">
+        <legend></legend>
+        <button type="button" class="text-button remove-question">移除本题</button>
+        <div class="question-mode" hidden>
+          <label class="mode-field"
+            >投票模式
+            <select class="mode-select">
+              <option value="single">普通单选</option>
+              <option value="approval">赞成 / 反对 / 弃权</option>
+              <option value="rating">五分评分</option>
+              <option value="quiz">答题测验</option>
+            </select>
+          </label>
+          <p class="help mode-guide"></p>
+        </div>
+        <label class="question-label">投票题目<span>0 / 60</span></label>
+        <textarea
+          maxlength="60"
+          rows="2"
+          required
+          placeholder="例如：周末团建，你更想去哪里？"
+        ></textarea>
+        <div class="custom-options">
+          <div class="option-heading">
+            <label>投票选项 <small>2～6 项，每项最多 24 字</small></label>
+            <button type="button" class="text-button add-option">＋ 添加选项</button>
+          </div>
+          <div class="options"></div>
+        </div>
+        <div class="fixed-options" hidden>
+          <h3>投票器上的选项</h3>
+          <ul></ul>
+        </div>
+        <label class="quiz-answer" hidden
+          >正确答案
+          <select class="correct-choice"></select>
+        </label>
+        <div class="font-warn card-font-warn" hidden>
+          <strong>发现字库暂不支持的字符：</strong>
+          <span class="font-warn-chars"></span>
+        </div>
+      </fieldset>
+    </template>
 
     <template id="deadline-template">
       <label

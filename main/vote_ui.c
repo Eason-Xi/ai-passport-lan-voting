@@ -127,6 +127,12 @@ void vote_ui_render(const vote_view_t *view)
         return;
     }
     const char *phase = poll->phase == VOTE_PUBLISHED ? "结果已公布" : poll->phase == VOTE_CLOSED ? "收票已截止" : "选择你的答案";
+    bool batch = poll->batch_count > 1;
+    if (batch) {
+        const char *stage = poll->phase == VOTE_PUBLISHED ? "结果" : poll->phase == VOTE_CLOSED ? "已截止" : "作答";
+        snprintf(text, sizeof(text), "%s %d/%d  已答 %d", stage, poll->batch_index, poll->batch_count, poll->answered);
+        phase = text;
+    }
     line(root, 50, model->connected ? phase : "连接中断，正在重连", model->connected ? GREEN : 0x9B632B);
     line(root, 82, poll->title, INK);
     if (poll->phase == VOTE_PUBLISHED) {
@@ -141,13 +147,14 @@ void vote_ui_render(const vote_view_t *view)
             lv_obj_set_style_text_align(count, LV_TEXT_ALIGN_RIGHT, 0);
             if (poll->counts[i] > 0) panel(root, 18, y + 22, 200 * poll->counts[i] / poll->total + 1, 2, SOFT);
         }
-        snprintf(text, sizeof(text), "共 %d 票 / 上下查看", poll->total);
+        snprintf(text, sizeof(text), batch ? "共 %d 票 / 确定换题" : "共 %d 票 / 上下查看", poll->total);
         footer(root, text);
         return;
     }
     if (model->confirming || model->pending_choice >= 0 || poll->my_choice >= 0 || poll->phase == VOTE_CLOSED) {
         int choice = poll->my_choice >= 0 ? poll->my_choice : model->pending_choice >= 0 ? model->pending_choice : model->selected;
         const char *status = model->confirming ? "确认提交这项？" : poll->my_choice >= 0 ? "投票成功" : model->pending_choice >= 0 ? "正在确认提交" : "本题未投票";
+        if (batch && poll->answered == poll->batch_count) status = "本组已全部完成";
         lv_obj_t *box = panel(root, 12, 122, 216, 99, SOFT);
         label(box, 12, 12, 192, status, GREEN);
         if (poll->my_choice >= 0 || model->pending_choice >= 0 || model->confirming) {
@@ -171,5 +178,6 @@ void vote_ui_render(const vote_view_t *view)
         lv_label_set_long_mode(option, selected ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
     }
     snprintf(text, sizeof(text), "%d/%d  上下选择 / 确定", model->selected + 1, poll->option_count);
+    if (batch) line(root, 258, poll->batch_index < poll->batch_count ? "提交后自动进入下一题" : "提交后完成本组投票", MUTED);
     footer(root, text);
 }

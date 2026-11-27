@@ -29,16 +29,17 @@ const PHASE_HINTS = {
   published: "最终结果已同步至全部投票器",
 };
 
-const PRESETS = {
-  agree: {
+const voteModes = {
+  single: { guide: "适合从几个方案中选出一个。" },
+  approval: {
+    guide: "赞成票超过赞成与反对票之和的一半即通过，弃权单独统计。",
     options: ["赞成", "反对", "弃权"],
   },
-  satisfy: {
-    options: ["非常满意", "比较满意", "一般", "不太满意"],
+  rating: {
+    guide: "每人选一个分值，主持台汇总平均分。",
+    options: ["1 分", "2 分", "3 分", "4 分", "5 分"],
   },
-  yesno: {
-    options: ["是", "否"],
-  },
+  quiz: { guide: "设置一个正确答案，主持台汇总答对人数和正确率。" },
 };
 
 const beijingTime = new Intl.DateTimeFormat("zh-CN", {
@@ -48,14 +49,27 @@ const beijingTime = new Intl.DateTimeFormat("zh-CN", {
   hourCycle: "h23",
 });
 
-const beijingShort = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: "Asia/Shanghai",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
+function modeResult(poll) {
+  const stats = poll.mode_summary;
+  if (!stats) return "";
+  if (poll.mode === "approval") {
+    if (stats.approval_pct === null) return "表决 · 暂无赞成或反对票";
+    const prefix = stats.passed ? "" : "未";
+    const status = poll.phase === "open" ? `当前${prefix}达到通过线` : `${prefix}通过`;
+    return `表决 · 赞成率 ${stats.approval_pct.toFixed(1)}%（不计弃权） · ${status}`;
+  }
+  if (poll.mode === "rating") {
+    return stats.average === null
+      ? "评分 · 暂无评分"
+      : `评分 · 平均 ${stats.average.toFixed(2)} 分`;
+  }
+  if (poll.mode === "quiz") {
+    const answer = `正确答案 ${String.fromCharCode(65 + poll.correct_choice)} · ${poll.options[poll.correct_choice]}`;
+    if (stats.correct_pct === null) return `${answer} · 暂无作答`;
+    return `${answer} · 答对 ${stats.correct_count} 人 · 正确率 ${stats.correct_pct.toFixed(1)}%`;
+  }
+  return "";
+}
 
 function hostNow() {
   return state.server_now_ms + (performance.now() - stateAt);
@@ -75,8 +89,9 @@ function showToast(message) {
   }, 2200);
 }
 
-function notice(message = "") {
+function notice(message = "", success = false) {
   $("notice").textContent = message;
+  $("notice").classList.toggle("success", success);
   $("notice").hidden = !message;
 }
 
@@ -102,7 +117,7 @@ async function copyText(text, okMessage) {
   }
 }
 
-/* ==================== 桌面端桥接自动检测 ==================== */
+/* ==================== 桌面端原生桥接 ==================== */
 function setupDesktopBridge() {
   const api = window.pywebview?.api;
   if (!api) return;
@@ -215,12 +230,12 @@ function renderDeadline(p) {
   const editor = $("edit-deadline");
   editor.hidden = p.phase !== "open" || !state.server_now_ms;
   if (editor.hidden || (editingPoll && editingPoll !== p.id)) editor.open = false;
+  // 折叠时准备当前值，展开后保留主持人的输入，轮询不会覆盖正在编辑的选择。
   if (!editor.open) {
     editingPoll = p.id;
     activeDeadline.reset(deadline);
   }
 
-  // 同步到大屏倒计时
   const stageCountdown = $("stage-countdown");
   if (deadline && p.phase === "open") {
     stageCountdown.hidden = false;
@@ -232,187 +247,19 @@ function renderDeadline(p) {
   }
 }
 
-/* ==================== 实时字库校验 & 选项编辑 ==================== */
-function findUnsupportedChars(texts) {
-  if (!coverage.length) return [];
-  return [
-    ...new Set(
-      [...texts.join("")].filter(
-        (c) => !coverage.some(([a, b]) => c.codePointAt(0) >= a && c.codePointAt(0) <= b),
-      ),
-    ),
-  ];
-}
-
-function checkLiveFontCoverage() {
-  const title = $("question").value;
-  const options = [...$("options").querySelectorAll("input")].map((i) => i.value);
-  const bad = findUnsupportedChars([title, ...options]);
-  const warn = $("font-warn");
-  if (!bad.length) {
-    warn.hidden = true;
-    return;
-  }
-  warn.hidden = false;
-  $("font-warn-chars").replaceChildren(
-    ...bad.slice(0, 12).map((ch) => {
-      const chip = document.createElement("span");
-      chip.className = "bad-char";
-      chip.textContent = ch === " " ? "空格" : ch;
-      return chip;
-    }),
-  );
-}
-
-function addOption(value = "", focus = false) {
-  if ($("options").children.length >= 6) return;
-  const row = document.createElement("div");
-  row.className = "option";
-
-  const letter = document.createElement("span");
-  letter.className = "option-letter";
-
-  const wrap = document.createElement("div");
-  wrap.className = "option-input-wrap";
-
-  const input = document.createElement("input");
-  input.required = true;
-  input.maxLength = 24;
-  input.value = value;
-
-  const lenTag = document.createElement("span");
-  lenTag.className = "option-len";
-  lenTag.textContent = `${[...value].length}/24`;
-
-  input.addEventListener("input", () => {
-    lenTag.textContent = `${[...input.value].length}/24`;
-    checkLiveFontCoverage();
-  });
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.isComposing) {
-      event.preventDefault();
-      const rows = [...$("options").children];
-      const idx = rows.indexOf(row);
-      if (idx === rows.length - 1 && rows.length < 6) {
-        addOption("", true);
-      } else if (idx < rows.length - 1) {
-        rows[idx + 1].querySelector("input").focus();
-      }
-    }
-  });
-  wrap.append(input, lenTag);
-
-  const up = document.createElement("button");
-  up.type = "button";
-  up.className = "option-move";
-  up.textContent = "↑";
-  up.title = "上移";
-  up.addEventListener("click", () => {
-    if (row.previousElementSibling) {
-      row.parentNode.insertBefore(row, row.previousElementSibling);
-      labelOptions();
-    }
-  });
-
-  const down = document.createElement("button");
-  down.type = "button";
-  down.className = "option-move";
-  down.textContent = "↓";
-  down.title = "下移";
-  down.addEventListener("click", () => {
-    if (row.nextElementSibling) {
-      row.parentNode.insertBefore(row.nextElementSibling, row);
-      labelOptions();
-    }
-  });
-
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "remove";
-  remove.textContent = "×";
-  remove.addEventListener("click", () => {
-    row.remove();
-    labelOptions();
-    checkLiveFontCoverage();
-  });
-
-  row.append(letter, wrap, up, down, remove);
-  $("options").append(row);
-  labelOptions();
-  if (focus) input.focus();
-}
-
-function setOptions(list) {
-  $("options").replaceChildren();
-  list.slice(0, 6).forEach((text) => addOption(text));
-  while ($("options").children.length < 2) addOption("");
-  checkLiveFontCoverage();
-}
-
-function labelOptions() {
-  const rows = [...$("options").children];
-  rows.forEach((row, i) => {
-    const label = String.fromCharCode(65 + i);
-    const input = row.querySelector("input");
-    const moves = row.querySelectorAll(".option-move");
-    const remove = row.querySelector(".remove");
-    row.querySelector(".option-letter").textContent = label;
-    input.placeholder = `选项 ${label}`;
-    input.setAttribute("aria-label", `选项 ${label}`);
-    moves[0].disabled = i === 0;
-    moves[0].setAttribute("aria-label", `上移选项 ${label}`);
-    moves[1].disabled = i === rows.length - 1;
-    moves[1].setAttribute("aria-label", `下移选项 ${label}`);
-    remove.disabled = rows.length <= 2;
-    remove.setAttribute("aria-label", `删除选项 ${label}`);
-  });
-  $("add-option").disabled = rows.length >= 6;
-}
-
-/* ==================== 网络操作 ==================== */
-async function action(name, body) {
-  if (!state || busy) return false;
-  busy = true;
-  updateButtons();
+$("deadline-form").onsubmit = async (event) => {
+  event.preventDefault();
+  if (!editingPoll || state?.poll?.id !== editingPoll) return;
   try {
-    const response = await fetch(`/api/${name}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Host-Nonce": state.nonce,
-      },
-      body: JSON.stringify(body),
-    });
-    const result = await response.json();
-    if (!response.ok) throw Error(result.error || "操作未完成，请刷新后重试");
-    notice();
-    await refresh();
-    return true;
+    if (await action("deadline", { poll_id: editingPoll, ...activeDeadline.value() })) {
+      $("edit-deadline").open = false;
+      if (state?.poll) activeDeadline.reset(state.poll.deadline_at_ms);
+      showToast("截止时间已更新");
+    }
   } catch (error) {
     notice(error.message);
-    return false;
-  } finally {
-    busy = false;
-    updateButtons();
   }
-}
-
-function updateButtons() {
-  const p = state?.poll;
-  $("start").disabled = busy || !state || (p && p.phase !== "published");
-  $("close").disabled = busy || !p || p.phase !== "open";
-  $("publish").disabled = busy || !p || p.phase === "published";
-  $("save-deadline").disabled = busy || p?.phase !== "open";
-  $("stage-close").disabled = $("close").disabled;
-  $("stage-publish").disabled = $("publish").disabled;
-  $("stage-export").disabled = !p;
-  newDeadline.mode.disabled = !state || !state.server_now_ms;
-  $("deadline-upgrade").hidden = !state || !!state.server_now_ms;
-  $("form-note").textContent =
-    p && p.phase !== "published"
-      ? "请先公布当前题目结果，再发起新题。"
-      : "发起后，题目将同步到所有在线投票器（快捷键 ⌘/Ctrl + Enter）。";
-}
+};
 
 /* ==================== 结果文案 & 高清 PNG 导出 ==================== */
 function formatResultText(poll) {
@@ -420,14 +267,21 @@ function formatResultText(poll) {
   const maxVotes = Math.max(...(poll.counts || [0]));
   const lines = [
     `【共选投票结果】${poll.title}`,
-    `总票数：${total} 票  |  状态：${PHASES[poll.phase] || poll.phase}`,
-    "------------------------------",
+    `总票数：${total} 票  |  状态：${PHASES[poll.phase] || "已归档"}`,
   ];
+  const summary = modeResult(poll);
+  if (summary) lines.push(summary);
+  lines.push("------------------------------");
   poll.options.forEach((opt, i) => {
     const cnt = poll.counts?.[i] || 0;
     const pct = total ? ((cnt * 100) / total).toFixed(1) : "0.0";
-    const crown = total > 0 && cnt === maxVotes ? " ★" : "";
-    lines.push(`${String.fromCharCode(65 + i)}. ${opt}：${cnt} 票（${pct}%）${crown}`);
+    const mark =
+      poll.mode === "quiz" && poll.correct_choice === i
+        ? " ✓"
+        : total > 0 && cnt === maxVotes
+          ? " ★"
+          : "";
+    lines.push(`${String.fromCharCode(65 + i)}. ${opt}：${cnt} 票（${pct}%）${mark}`);
   });
   return lines.join("\n");
 }
@@ -470,10 +324,11 @@ async function exportPollImage(poll) {
   const mctx = measureCanvas.getContext("2d");
   mctx.font = `700 36px ${fontBase}`;
   const titleLines = wrapCanvasLines(mctx, poll.title, contentW);
+  const summaryText = modeResult(poll);
 
   const rowH = 90;
   const headerH = 140;
-  const titleBlockH = titleLines.length * 50 + 58;
+  const titleBlockH = titleLines.length * 50 + (summaryText ? 96 : 54);
   const bodyH = poll.options.length * (rowH + 14);
   const footerH = 84;
   const height = headerH + titleBlockH + bodyH + footerH;
@@ -485,18 +340,15 @@ async function exportPollImage(poll) {
   const ctx = canvas.getContext("2d");
   ctx.scale(scale, scale);
 
-  // 背景
   ctx.fillStyle = "#f4f7f2";
   ctx.fillRect(0, 0, width, height);
 
-  // 顶部松翠色带
   const headerGrad = ctx.createLinearGradient(0, 0, width, headerH);
   headerGrad.addColorStop(0, "#155f50");
   headerGrad.addColorStop(1, "#0d3f35");
   ctx.fillStyle = headerGrad;
   ctx.fillRect(0, 0, width, headerH);
 
-  // 品牌章
   drawRoundedRect(ctx, padX, 42, 54, 54, 14);
   ctx.fillStyle = "rgba(255,255,255,0.16)";
   ctx.fill();
@@ -511,10 +363,8 @@ async function exportPollImage(poll) {
   ctx.fillText("共选 · 局域网投票结果", padX + 72, 58);
   ctx.fillStyle = "rgba(232,248,240,0.78)";
   ctx.font = `400 15px ${fontBase}`;
-  const stamp = beijingTime.format(Date.now());
-  ctx.fillText(`导出时间：${stamp}（北京时间）`, padX + 72, 86);
+  ctx.fillText(`导出时间：${beijingTime.format(Date.now())}（北京时间）`, padX + 72, 86);
 
-  // 总票数徽章
   const total = poll.total || 0;
   ctx.textAlign = "right";
   ctx.fillStyle = "#ffffff";
@@ -522,10 +372,9 @@ async function exportPollImage(poll) {
   ctx.fillText(`${total} 票`, width - padX, 60);
   ctx.fillStyle = "rgba(232,248,240,0.78)";
   ctx.font = `400 14px ${fontBase}`;
-  ctx.fillText(PHASES[poll.phase] || "投票统计", width - padX, 88);
+  ctx.fillText(PHASES[poll.phase] || "历史归档", width - padX, 88);
 
-  // 题目区
-  let y = headerH + 44;
+  let y = headerH + 40;
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
   ctx.fillStyle = "#143530";
@@ -534,13 +383,27 @@ async function exportPollImage(poll) {
     ctx.fillText(line, padX, y);
     y += 50;
   }
-  y += 20;
+
+  if (summaryText) {
+    y += 6;
+    drawRoundedRect(ctx, padX, y, contentW, 42, 10);
+    ctx.fillStyle = "#e6f3ec";
+    ctx.fill();
+    ctx.fillStyle = "#134d3e";
+    ctx.font = `600 18px ${fontBase}`;
+    ctx.textBaseline = "middle";
+    ctx.fillText(summaryText, padX + 16, y + 21);
+    y += 58;
+  } else {
+    y += 18;
+  }
 
   const maxVotes = Math.max(...(poll.counts || [0]));
   poll.options.forEach((opt, i) => {
     const cnt = poll.counts?.[i] || 0;
     const pct = total ? (cnt * 100) / total : 0;
-    const leading = total > 0 && cnt === maxVotes;
+    const isCorrect = poll.mode === "quiz" && poll.correct_choice === i;
+    const leading = isCorrect || (total > 0 && cnt === maxVotes);
 
     drawRoundedRect(ctx, padX, y, contentW, rowH, 16);
     ctx.fillStyle = leading ? "#edf7f2" : "#ffffff";
@@ -549,7 +412,6 @@ async function exportPollImage(poll) {
     ctx.lineWidth = leading ? 2 : 1;
     ctx.stroke();
 
-    // 字母
     drawRoundedRect(ctx, padX + 20, y + 18, 32, 32, 8);
     ctx.fillStyle = leading ? "#145e4f" : "#e5eee7";
     ctx.fill();
@@ -559,23 +421,20 @@ async function exportPollImage(poll) {
     ctx.textBaseline = "middle";
     ctx.fillText(String.fromCharCode(65 + i), padX + 36, y + 35);
 
-    // 选项文字
     ctx.textAlign = "left";
     ctx.fillStyle = "#143530";
     ctx.font = `600 21px ${fontBase}`;
-    ctx.fillText(opt, padX + 64, y + 35);
+    ctx.fillText(opt + (isCorrect ? "（正确答案）" : ""), padX + 64, y + 35);
 
-    // 票数
     ctx.textAlign = "right";
     ctx.fillStyle = leading ? "#145e4f" : "#3a5a52";
     ctx.font = `700 20px ${fontBase}`;
     ctx.fillText(
-      `${leading ? "★ " : ""}${cnt} 票 · ${pct.toFixed(1)}%`,
+      `${!isCorrect && total > 0 && cnt === maxVotes ? "★ " : ""}${cnt} 票 · ${pct.toFixed(1)}%`,
       padX + contentW - 22,
       y + 35,
     );
 
-    // 进度条
     const barX = padX + 20;
     const barY = y + 62;
     const barW = contentW - 40;
@@ -590,7 +449,6 @@ async function exportPollImage(poll) {
     y += rowH + 14;
   });
 
-  // 页脚
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillStyle = "#778a7f";
@@ -620,16 +478,604 @@ async function exportPollImage(poll) {
   showToast("已导出结果图片 PNG");
 }
 
-/* ==================== 主界面 & 大屏渲染 ==================== */
-function renderStage(p, onlineCount) {
+/* ==================== 投票历史归档面板 ==================== */
+let historyHead;
+let historyBefore = null;
+let historyRequest = 0;
+
+function loadQuestionsIntoEditor(questions) {
+  if (!questions?.length) return;
+  $("questions").replaceChildren();
+  questions.forEach((q) => {
+    const card = makeQuestionCard();
+    card.querySelector(".remove-question").onclick = () => {
+      if ($("questions").children.length <= 1) return;
+      card.remove();
+      numberQuestions();
+    };
+    const titleEl = card.querySelector("textarea");
+    titleEl.value = q.title || "";
+    card.querySelector(".question-label span").textContent = `${[...titleEl.value].length} / 60`;
+    const mode = voteModes[q.mode] ? q.mode : "single";
+    card.querySelector(".mode-select").value = mode;
+    if (!voteModes[mode].options && Array.isArray(q.options)) {
+      const optBox = card.querySelector(".options");
+      optBox.replaceChildren();
+      q.options.slice(0, 6).forEach((text) => addOption(card, text));
+      while (optBox.children.length < 2) addOption(card, "");
+    }
+    updateQuestionMode(card);
+    if (mode === "quiz" && Number.isInteger(q.correct_choice)) {
+      const rows = card.querySelectorAll(".options .option");
+      const target = rows[q.correct_choice];
+      if (target) card.querySelector(".correct-choice").value = target.dataset.choice;
+    }
+    checkCardFont(card);
+    $("questions").append(card);
+  });
+  numberQuestions();
+  preparingNext = true;
+  updateButtons();
+  $("poll-form").scrollIntoView({ behavior: "smooth", block: "start" });
+  showToast(`已载入 ${questions.length} 道题目到新建表单`);
+}
+
+function historyEntry(report) {
+  const entry = document.createElement("details");
+  entry.className = "history-entry";
+  entry.dataset.id = report.id;
+
+  const summary = document.createElement("summary");
+  const title = document.createElement("strong");
+  title.textContent = report.title;
+  const meta = document.createElement("small");
+  const when =
+    report.ended_at_ms === null
+      ? `发起于 ${beijingTime.format(report.started_at_ms)}`
+      : `结束于 ${beijingTime.format(report.ended_at_ms)}`;
+  meta.textContent = `${when} · ${report.question_count} 题 · ${report.participants} 人参与 · ${report.total_votes} 票`;
+  summary.append(title, meta);
+
+  const body = document.createElement("div");
+  body.className = "history-body";
+  entry.append(summary, body);
+
+  entry.ontoggle = async () => {
+    if (!entry.open || entry.dataset.loaded) return;
+    entry.dataset.loaded = "loading";
+    body.textContent = "正在读取统计…";
+    try {
+      const response = await fetch(`/api/history/${report.id}`, { cache: "no-store" });
+      if (!response.ok) throw Error();
+      const detail = await response.json();
+      body.replaceChildren();
+
+      const toolbar = document.createElement("div");
+      toolbar.className = "history-toolbar";
+
+      const times = document.createElement("p");
+      times.className = "help";
+      const end =
+        detail.ended_at_ms === null
+          ? "旧版未记录结束时间"
+          : "结束于 " + beijingTime.format(detail.ended_at_ms);
+      times.textContent = `北京时间 · 发起于 ${beijingTime.format(detail.started_at_ms)} · ${end}`;
+
+      const tools = document.createElement("div");
+      tools.className = "history-tool-btns";
+
+      const download = document.createElement("a");
+      download.className = "mini-tool";
+      download.href = `/api/history/${report.id}/csv`;
+      download.download = "";
+      download.textContent = "下载统计 CSV";
+      download.onclick = async (ev) => {
+        if (!window.pywebview?.api?.save_csv) return;
+        ev.preventDefault();
+        try {
+          const csvRes = await fetch(download.href, { cache: "no-store" });
+          if (!csvRes.ok) throw Error();
+          const saved = await window.pywebview.api.save_csv(
+            `vote-${report.id}.csv`,
+            await csvRes.text(),
+          );
+          if (saved) showToast("统计 CSV 已保存");
+        } catch {
+          notice("保存 CSV 失败，请重试。");
+        }
+      };
+
+      const reuseBtn = document.createElement("button");
+      reuseBtn.type = "button";
+      reuseBtn.className = "mini-tool";
+      reuseBtn.textContent = "复用本场题目";
+      reuseBtn.onclick = () => loadQuestionsIntoEditor(detail.questions);
+
+      tools.append(download, reuseBtn);
+      toolbar.append(times, tools);
+      body.append(toolbar);
+
+      detail.questions.forEach((question, index) => {
+        const qHead = document.createElement("div");
+        qHead.className = "live-title-row";
+        const heading = document.createElement("h3");
+        heading.textContent = `${index + 1}. ${question.title}（${question.total} 票）`;
+        const pngBtn = document.createElement("button");
+        pngBtn.type = "button";
+        pngBtn.className = "mini-tool";
+        pngBtn.textContent = "导出图片";
+        pngBtn.onclick = () => exportPollImage(question);
+        qHead.append(heading, pngBtn);
+        body.append(qHead);
+
+        const result = modeResult(question);
+        if (result) {
+          const modeEl = document.createElement("p");
+          modeEl.className = "mode-result";
+          modeEl.textContent = result;
+          body.append(modeEl);
+        }
+
+        const list = document.createElement("ul");
+        question.options.forEach((option, i) => {
+          const row = document.createElement("li");
+          const name = document.createElement("span");
+          const tally = document.createElement("b");
+          name.textContent = `${String.fromCharCode(65 + i)}  ${option}`;
+          if (question.mode === "quiz" && question.correct_choice === i) row.dataset.correct = "";
+          const percent = question.total ? (question.counts[i] * 100) / question.total : 0;
+          tally.textContent = `${question.counts[i]} 票 · ${percent.toFixed(1)}%`;
+          row.append(name, tally);
+          list.append(row);
+        });
+        body.append(list);
+      });
+      entry.dataset.loaded = "yes";
+    } catch {
+      delete entry.dataset.loaded;
+      body.textContent = "统计暂时无法读取，请收起后重新打开。";
+    }
+  };
+  return entry;
+}
+
+async function loadHistory(before = null) {
+  const serial = ++historyRequest;
+  const list = $("history-list");
+  $("history-more").disabled = true;
+  $("history-retry").hidden = true;
+  try {
+    const response = await fetch("/api/history" + (before ? `?before=${before}` : ""), {
+      cache: "no-store",
+    });
+    if (!response.ok) throw Error();
+    const page = await response.json();
+    if (serial !== historyRequest) return;
+    const existing = new Map([...list.children].map((row) => [row.dataset.id, row]));
+    const rows = page.reports.map((report) => existing.get(report.id) || historyEntry(report));
+    if (before) list.append(...rows);
+    else list.replaceChildren(...rows);
+    historyBefore = page.next_before;
+    $("history-more").hidden = historyBefore === null;
+    $("history-status").textContent = list.childElementCount
+      ? ""
+      : "尚无已结束的投票。收票结束后，统计会自动保存在这里。";
+  } catch {
+    if (serial !== historyRequest) return;
+    $("history-status").textContent = "暂时无法读取投票历史。";
+    $("history-retry").hidden = false;
+  } finally {
+    if (serial === historyRequest) $("history-more").disabled = false;
+  }
+}
+
+$("history-more").onclick = () => loadHistory(historyBefore);
+$("history-retry").onclick = () => loadHistory();
+$("current-report").onclick = async (event) => {
+  event.preventDefault();
+  const id = state?.poll?.id;
+  const findEntry = () => [...$("history-list").children].find((entry) => entry.dataset.id === id);
+  if (!findEntry()) await loadHistory();
+  const entry = findEntry();
+  if (entry) entry.open = true;
+  (entry || $("history")).scrollIntoView({ block: "start" });
+};
+
+/* ==================== 实时字库校验 & 题目编辑器 ==================== */
+function findUnsupportedChars(texts) {
+  if (!coverage.length) return [];
+  return [
+    ...new Set(
+      [...texts.join("")].filter(
+        (c) => !coverage.some(([a, b]) => c.codePointAt(0) >= a && c.codePointAt(0) <= b),
+      ),
+    ),
+  ];
+}
+
+function checkCardFont(card) {
+  const warn = card.querySelector(".card-font-warn");
+  if (!warn) return;
+  const mode = card.querySelector(".mode-select").value;
+  const title = card.querySelector("textarea").value;
+  const opts = voteModes[mode]?.options
+    ? []
+    : [...card.querySelectorAll(".options input")].map((i) => i.value);
+  const bad = findUnsupportedChars([title, ...opts]);
+  if (!bad.length) {
+    warn.hidden = true;
+    return;
+  }
+  warn.hidden = false;
+  warn.querySelector(".font-warn-chars").replaceChildren(
+    ...bad.slice(0, 12).map((ch) => {
+      const chip = document.createElement("span");
+      chip.className = "bad-char";
+      chip.textContent = ch === " " ? "空格" : ch;
+      return chip;
+    }),
+  );
+}
+
+let optionSerial = 0;
+function addOption(card, value = "", focus = false) {
+  const options = card.querySelector(".options");
+  if (options.children.length >= 6) return;
+  const row = document.createElement("div");
+  row.className = "option";
+  row.dataset.choice = String(++optionSerial);
+
+  const letter = document.createElement("span");
+  letter.className = "option-letter";
+
+  const wrap = document.createElement("div");
+  wrap.className = "option-input-wrap";
+
+  const input = document.createElement("input");
+  input.required = true;
+  input.maxLength = 24;
+  input.value = value;
+
+  const lenTag = document.createElement("span");
+  lenTag.className = "option-len";
+  lenTag.textContent = `${[...value].length}/24`;
+
+  input.oninput = () => {
+    lenTag.textContent = `${[...input.value].length}/24`;
+    updateCorrectOptions(card);
+    checkCardFont(card);
+  };
+  input.onkeydown = (event) => {
+    if (event.key === "Enter" && !event.isComposing) {
+      event.preventDefault();
+      const rows = [...options.children];
+      const idx = rows.indexOf(row);
+      if (idx === rows.length - 1 && rows.length < 6) {
+        addOption(card, "", true);
+      } else if (idx < rows.length - 1) {
+        rows[idx + 1].querySelector("input").focus();
+      }
+    }
+  };
+  wrap.append(input, lenTag);
+
+  const up = document.createElement("button");
+  up.type = "button";
+  up.className = "option-move";
+  up.textContent = "↑";
+  up.title = "上移";
+  up.onclick = () => {
+    if (row.previousElementSibling) {
+      options.insertBefore(row, row.previousElementSibling);
+      labelOptions(card);
+    }
+  };
+
+  const down = document.createElement("button");
+  down.type = "button";
+  down.className = "option-move";
+  down.textContent = "↓";
+  down.title = "下移";
+  down.onclick = () => {
+    if (row.nextElementSibling) {
+      options.insertBefore(row.nextElementSibling, row);
+      labelOptions(card);
+    }
+  };
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "remove";
+  remove.textContent = "×";
+  remove.addEventListener("click", () => {
+    row.remove();
+    labelOptions(card);
+    checkCardFont(card);
+  });
+
+  row.append(letter, wrap, up, down, remove);
+  options.append(row);
+  labelOptions(card);
+  if (focus) input.focus();
+}
+
+function labelOptions(card) {
+  const rows = [...card.querySelector(".options").children];
+  rows.forEach((row, i) => {
+    const label = String.fromCharCode(65 + i);
+    const input = row.querySelector("input");
+    const moves = row.querySelectorAll(".option-move");
+    const remove = row.querySelector(".remove");
+    row.querySelector(".option-letter").textContent = label;
+    input.placeholder = `选项 ${label}`;
+    input.setAttribute("aria-label", `选项 ${label}`);
+    moves[0].disabled = i === 0;
+    moves[0].setAttribute("aria-label", `上移选项 ${label}`);
+    moves[1].disabled = i === rows.length - 1;
+    moves[1].setAttribute("aria-label", `下移选项 ${label}`);
+    remove.disabled = rows.length <= 2;
+    remove.setAttribute("aria-label", `删除选项 ${label}`);
+  });
+  card.querySelector(".add-option").disabled = rows.length >= 6;
+  updateCorrectOptions(card);
+}
+
+function updateCorrectOptions(card) {
+  const select = card.querySelector(".correct-choice");
+  const selected = select.value;
+  select.replaceChildren(new Option("请选择正确选项", ""));
+  [...card.querySelectorAll(".options .option")].forEach((row, i) => {
+    const value = row.querySelector("input").value.trim();
+    const item = new Option(
+      `${String.fromCharCode(65 + i)} · ${value || "待填写"}`,
+      row.dataset.choice,
+    );
+    item.disabled = !value;
+    select.add(item);
+    if (selected === item.value && !item.disabled) select.value = selected;
+  });
+}
+
+function updateQuestionMode(card) {
+  const mode = card.querySelector(".mode-select").value;
+  const config = voteModes[mode];
+  const fixed = card.querySelector(".fixed-options");
+  const custom = card.querySelector(".custom-options");
+  card.querySelector(".mode-guide").textContent = config.guide;
+  fixed.hidden = !config.options;
+  custom.hidden = !!config.options;
+  custom.querySelectorAll("input").forEach((input) => {
+    input.disabled = custom.hidden;
+  });
+  const items = (config.options || []).map((label) => {
+    const item = document.createElement("li");
+    item.textContent = label;
+    return item;
+  });
+  fixed.querySelector("ul").replaceChildren(...items);
+  const answer = card.querySelector(".correct-choice");
+  answer.parentElement.hidden = mode !== "quiz";
+  answer.disabled = mode !== "quiz";
+  answer.required = mode === "quiz";
+  checkCardFont(card);
+}
+
+let questionSerial = 0;
+function makeQuestionCard() {
+  const card = $("question-template").content.firstElementChild.cloneNode(true);
+  const title = card.querySelector("textarea");
+  const label = card.querySelector(".question-label");
+  title.id = "question-" + ++questionSerial;
+  label.htmlFor = title.id;
+  title.oninput = () => {
+    label.querySelector("span").textContent = `${[...title.value].length} / 60`;
+    checkCardFont(card);
+  };
+  card.querySelector(".add-option").onclick = () => addOption(card, "", true);
+  const mode = card.querySelector(".mode-select");
+  const guide = card.querySelector(".mode-guide");
+  guide.id = title.id + "-mode-guide";
+  mode.setAttribute("aria-describedby", guide.id);
+  mode.onchange = () => updateQuestionMode(card);
+  addOption(card);
+  addOption(card);
+  updateQuestionMode(card);
+  return card;
+}
+
+function addQuestion() {
+  const card = makeQuestionCard();
+  card.querySelector(".remove-question").onclick = () => {
+    if ($("questions").children.length <= 1) return;
+    card.remove();
+    numberQuestions();
+  };
+  $("questions").append(card);
+  numberQuestions();
+  return card.querySelector("textarea");
+}
+
+function numberQuestions() {
+  [...$("questions").children].forEach((card, i) => {
+    card.querySelector("legend").textContent = `第 ${i + 1} 题`;
+  });
+  updateButtons();
+}
+
+let editorRound = null;
+let appendBatch = null;
+let appendAttempt = null;
+let preparingNext = false;
+
+function resetAppend(batchId) {
+  const card = makeQuestionCard();
+  card.querySelector(".remove-question").remove();
+  card.querySelector(".question-label").firstChild.textContent = "追加题目";
+  $("append-question").replaceChildren(card);
+  appendBatch = batchId;
+  appendAttempt = null;
+}
+
+function updateEditor() {
+  const poll = state?.poll;
+  const active = state?.supports_append && poll?.phase === "open";
+  const count = state?.batch?.polls.length || 1;
+  const full = count >= (state?.max_batch_polls || 1);
+  if (state) {
+    if (editorRound !== (poll?.id ?? null)) {
+      preparingNext = false;
+      editorRound = poll?.id ?? null;
+    }
+    if (
+      active &&
+      appendBatch !== poll.id &&
+      ![...$("append-question").querySelectorAll("input,textarea")].some((input) =>
+        input.value.trim(),
+      )
+    ) {
+      resetAppend(poll.id);
+    }
+    const appending = active && !preparingNext;
+    $("poll-form").hidden = !!appending;
+    $("append-form").hidden = !appending;
+    $("editor-title").textContent = appending
+      ? "向本场追加题目"
+      : active
+        ? "准备下一场投票"
+        : "新建投票";
+    $("editor-sub").textContent = appending
+      ? "答完前题的投票器会立即收到新题，沿用本场截止时间"
+      : "支持单题或一次最多 50 题批量发起，可混用 4 种投票模式";
+    $("editor-mode").hidden = !active;
+    $("editor-mode").textContent = appending ? "准备下一场投票" : "返回本场追加题目";
+    if (active) {
+      const stale = appendBatch !== poll.id;
+      $("use-append-draft").hidden = !stale;
+      $("append-note").textContent = stale
+        ? "这份草稿属于上一场。请核对后再用于当前场次。"
+        : full
+          ? `本场已达到 ${state.max_batch_polls} 题上限。`
+          : `新题将排在第 ${count + 1} 题，沿用本场截止时间。答完前题的投票器会立即收到新题。`;
+    }
+  }
+  $("editor-mode").disabled = busy;
+  $("use-append-draft").disabled = busy || !active;
+  const retry = appendAttempt && state?.batch?.polls.some((q) => q.id === appendAttempt.id);
+  $("append-submit").disabled = busy || !active || appendBatch !== poll?.id || (full && !retry);
+  const card = $("append-question").firstElementChild;
+  if (card) card.disabled = busy;
+}
+
+$("editor-mode").onclick = () => {
+  preparingNext = !preparingNext;
+  updateButtons();
+};
+$("use-append-draft").onclick = () => {
+  if (state?.poll?.phase !== "open") return;
+  appendBatch = state.poll.id;
+  appendAttempt = null;
+  updateButtons();
+};
+
+/* ==================== 后端交互 ==================== */
+async function action(name, body) {
+  if (!state || busy) return false;
+  busy = true;
+  updateButtons();
+  try {
+    const response = await fetch(`/api/${name}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Host-Nonce": state.nonce,
+      },
+      body: JSON.stringify(body),
+    });
+    const result = await response.json().catch(() => {
+      throw Error("未收到主持服务的确认，请保留当前内容后重试。");
+    });
+    if (!response.ok) throw Error(result.error || "操作未完成，请刷新后重试");
+    if ((name === "create" || name === "create_batch") && Number.isInteger(result.pushed_to)) {
+      notice(
+        result.pushed_to
+          ? `已发起，题目已推送至 ${result.pushed_to} 台在线投票器，可立即作答。`
+          : "已发起，当前没有在线投票器。设备入场后会自动收到题目。",
+        true,
+      );
+    } else if (name === "append_question") {
+      notice(`新题已追加，已同步至 ${result.pushed_to} 台在线投票器。`, true);
+    } else if (name !== "alias") {
+      notice();
+    }
+    await refresh();
+    return true;
+  } catch (error) {
+    notice(error instanceof TypeError ? "暂时无法连接主持服务，请保留当前内容后重试。" : error.message);
+    return false;
+  } finally {
+    busy = false;
+    updateButtons();
+  }
+}
+
+function activeLivePoll() {
+  const batch = state?.batch?.polls;
+  if (!batch) return state?.poll || null;
+  return batch.find((q) => q.id === $("live-question").value) || batch[0] || state?.poll || null;
+}
+
+function updateButtons() {
+  updateEditor();
+  document.querySelectorAll(".question-mode").forEach((control) => {
+    control.hidden = !state?.supports_modes;
+  });
+  const p = state?.poll;
+  const size = $("questions").children.length;
+  $("add-question").disabled = !state || busy || size >= (state.max_batch_polls || 1);
+  $("add-question").textContent =
+    state?.max_batch_polls && size >= state.max_batch_polls
+      ? `已达 ${state.max_batch_polls} 题上限`
+      : "＋ 添加题目";
+  $("start").textContent = size > 1 ? `一次发起 ${size} 题` : "发起投票";
+  $("batch-deadline-note").hidden = size <= 1;
+  $("batch-deadline-note").textContent = `所选截止时间适用于这 ${size} 道题。`;
+  $("start").disabled = busy || !state || (p && p.phase !== "published");
+  $("close").disabled = busy || !p || p.phase !== "open";
+  $("publish").disabled = busy || !p || p.phase === "published";
+  $("save-deadline").disabled = busy || p?.phase !== "open";
+  $("show-result").disabled = busy || !state?.batch || p?.phase !== "published";
+  $("stage-close").disabled = $("close").disabled;
+  $("stage-publish").disabled = $("publish").disabled;
+  $("stage-export").disabled = !p;
+  newDeadline.mode.disabled = !state || !state.server_now_ms;
+  $("deadline-upgrade").hidden = !state || !!state.server_now_ms;
+  $("form-note").textContent =
+    p && p.phase !== "published"
+      ? "发起下一场前，请先公布本场结果。"
+      : "发起后将推送到在线投票器，收票期间可继续追加题目。";
+}
+
+/* ==================== 渲染大屏、设备与主界面 ==================== */
+function renderStage(p, batch, onlineCount) {
   $("stage-code").textContent = state.join_code;
   $("stage-online").textContent = String(onlineCount);
-  $("stage-votes").textContent = String(p?.total || 0);
+  const totalShown = batch ? batch.reduce((s, q) => s + q.total, 0) : p?.total || 0;
+  $("stage-votes").textContent = String(totalShown);
   $("stage-phase-text").textContent = p ? PHASES[p.phase] : "等待发起";
 
   $("stage-empty").hidden = !!p;
   $("stage-content").hidden = !p;
+
+  const hasBatch = !!(batch && batch.length > 1);
+  $("stage-prev").hidden = !hasBatch;
+  $("stage-next").hidden = !hasBatch;
+  $("stage-batch-tag").hidden = !hasBatch;
   if (!p) return;
+
+  if (hasBatch) {
+    const idx = Math.max(0, batch.findIndex((q) => q.id === p.id));
+    $("stage-batch-tag").textContent = `第 ${idx + 1} / ${batch.length} 题`;
+  }
 
   const hideCounts = stageMaskCounts && p.phase !== "published";
   $("stage-toggle-mask").hidden = p.phase === "published";
@@ -637,10 +1083,14 @@ function renderStage(p, onlineCount) {
   $("stage-title").textContent = p.title;
   $("stage-subtitle").textContent =
     p.phase === "published"
-      ? `最终结果已公布 · 共收到 ${p.total} 票`
+      ? `最终结果已公布 · 本题共收到 ${p.total} 票`
       : hideCounts
-        ? `投票进行中 · 已收到 ${p.total} 票（大屏已隐藏实时票数防止干扰）`
-        : `投票进行中 · 实时共收到 ${p.total} 票`;
+        ? `投票进行中 · 本题已收到 ${p.total} 票（大屏已隐藏实时票数防止干扰）`
+        : `投票进行中 · 本题实时收到 ${p.total} 票`;
+
+  const modeSummaryText = hideCounts ? "" : modeResult(p);
+  $("stage-mode-result").hidden = !modeSummaryText;
+  $("stage-mode-result").textContent = modeSummaryText;
 
   const maxVotes = Math.max(...(p.counts || [0]));
   const winners = p.counts ? p.counts.filter((c) => c === maxVotes).length : 0;
@@ -649,7 +1099,8 @@ function renderStage(p, onlineCount) {
     ...p.options.map((option, i) => {
       const cnt = p.counts?.[i] || 0;
       const pct = p.total ? (cnt * 100) / p.total : 0;
-      const leading = !hideCounts && p.total > 0 && cnt === maxVotes;
+      const isCorrect = !hideCounts && p.mode === "quiz" && p.correct_choice === i;
+      const leading = isCorrect || (!hideCounts && p.total > 0 && cnt === maxVotes);
 
       const card = document.createElement("div");
       card.className = `stage-result${leading ? " leading" : ""}`;
@@ -666,7 +1117,12 @@ function renderStage(p, onlineCount) {
       label.textContent = option;
       name.append(letter, label);
 
-      if (leading && p.phase === "published") {
+      if (isCorrect) {
+        const tag = document.createElement("span");
+        tag.className = "correct-tag";
+        tag.textContent = "正确答案 ✓";
+        name.append(tag);
+      } else if (leading && p.phase === "published") {
         const tag = document.createElement("span");
         tag.className = "leader-tag";
         tag.textContent = winners > 1 ? "并列最高" : "得票最高";
@@ -692,7 +1148,7 @@ function renderStage(p, onlineCount) {
   );
 }
 
-function renderDevices() {
+function renderDevices(batch) {
   $("device-count").textContent = `${state.devices.length} 台已登记`;
   $("device-list").replaceChildren(
     ...state.devices.map((d) => {
@@ -725,7 +1181,7 @@ function renderDevices() {
         '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M11.2 2.8a1.5 1.5 0 0 1 2.1 2.1L6 12.2 3 13l.8-3 7.4-7.2Z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg>';
       editBtn.onclick = () => {
         editingAliasDevice = editingAliasDevice === d.id ? null : d.id;
-        renderDevices();
+        renderDevices(batch);
         const field = box.parentElement?.querySelector(".alias-form input");
         if (field) field.focus();
       };
@@ -755,13 +1211,13 @@ function renderDevices() {
           if (ok) {
             editingAliasDevice = null;
             showToast(input.value.trim() ? "设备备注已保存" : "已清除设备备注");
-            renderDevices();
+            renderDevices(batch);
           }
         };
         input.onkeydown = (ev) => {
           if (ev.key === "Escape") {
             editingAliasDevice = null;
-            renderDevices();
+            renderDevices(batch);
           }
         };
         form.append(input, save);
@@ -769,8 +1225,13 @@ function renderDevices() {
       }
 
       const detail = document.createElement("p");
+      const progress = batch
+        ? `已答 ${d.answered} / ${batch.length} 题`
+        : d.voted
+          ? "已投票 ✓"
+          : "未投票";
+      detail.textContent = `${d.online ? "在线" : "离线"} · ${progress}`;
       detail.className = `device-status${d.voted ? " done" : ""}`;
-      detail.textContent = `${d.online ? "在线" : "离线"} · ${d.voted ? "已投票 ✓" : "未投票"}`;
       box.append(detail);
 
       if (!d.online) {
@@ -794,27 +1255,43 @@ function renderDevices() {
 }
 
 function render() {
-  const p = state.poll;
+  if (state.latest_report !== historyHead) {
+    historyHead = state.latest_report;
+    loadHistory();
+  }
+  const batch = state.batch?.polls;
+  const picker = $("live-question");
+  $("batch-picker").hidden = !batch;
+  if (batch && (picker.dataset.batch !== state.batch.id || picker.options.length !== batch.length)) {
+    const selected = picker.value;
+    picker.replaceChildren(...batch.map((q, i) => new Option(`第 ${i + 1} 题 · ${q.title}`, q.id)));
+    if (batch.some((q) => q.id === selected)) picker.value = selected;
+    picker.dataset.batch = state.batch.id;
+  }
+
+  const p = batch?.find((q) => q.id === picker.value) || state.poll;
   const onlineCount = state.devices.filter((d) => d.online).length;
   const maxDevices = state.max_devices || 10;
 
-  // 新题开始时恢复大屏默认防剧透状态；公布时自动揭晓
-  if (p?.id !== lastPollId) {
-    lastPollId = p?.id || null;
-    if (p && p.phase === "open") stageMaskCounts = true;
+  if (state.poll?.id !== lastPollId) {
+    lastPollId = state.poll?.id || null;
+    if (state.poll && state.poll.phase === "open") stageMaskCounts = true;
   }
-  if (p?.phase === "published" && lastPollPhase !== "published") {
+  if (state.poll?.phase === "published" && lastPollPhase !== "published") {
     stageMaskCounts = false;
   }
-  lastPollPhase = p?.phase || null;
+  lastPollPhase = state.poll?.phase || null;
 
+  $("current-report").hidden = !p || p.phase === "open" || state.latest_report !== state.poll.id;
   $("join-code").textContent = state.join_code;
   $("online").textContent = String(onlineCount);
   $("online-bar").style.width = `${Math.min(100, (onlineCount / maxDevices) * 100)}%`;
 
-  const totalVotes = p?.total || 0;
+  $("votes-label").textContent = batch ? "本组已收票" : "本题已收票";
+  const totalVotes = batch ? batch.reduce((sum, q) => sum + q.total, 0) : p?.total || 0;
   $("votes").textContent = String(totalVotes);
-  const denom = Math.max(onlineCount, totalVotes);
+  const expectedVotes = batch ? onlineCount * batch.length : onlineCount;
+  const denom = Math.max(expectedVotes, totalVotes);
   const turnoutPct = denom ? Math.min(100, Math.round((totalVotes * 100) / denom)) : 0;
   $("votes-bar").style.width = p ? `${turnoutPct}%` : "0%";
   $("turnout-rate").textContent = p
@@ -823,10 +1300,15 @@ function render() {
       : "等待设备投票"
     : "等待收票";
 
+  $("close").textContent = batch ? "整组截止收票" : "截止收票";
+  $("publish").textContent = batch ? "公布整组结果" : "公布结果";
+  $("edit-deadline").querySelector("summary").textContent = batch
+    ? "调整整组截止时间"
+    : "调整截止时间";
+
   $("phase").textContent = p ? PHASES[p.phase] : "等待发起";
   $("phase-card").dataset.phase = p ? p.phase : "idle";
   $("phase-hint").textContent = p ? PHASE_HINTS[p.phase] : "准备新题目后即可同步发题";
-
   $("live-badge").textContent = p ? PHASES[p.phase] : "等待开始";
   $("live-badge").classList.toggle("active", p?.phase === "open");
   $("live-sub").textContent =
@@ -840,17 +1322,25 @@ function render() {
 
   $("empty").hidden = !!p;
   $("live-poll").hidden = !p;
+  $("show-result").hidden = !batch || p?.phase !== "published";
 
   if (p) {
-    renderDeadline(p);
+    renderDeadline(state.poll);
     $("live-title").textContent = p.title;
     $("result-caption").textContent =
       p.phase === "published"
         ? "结果已同步至在线投票器；重连设备会自动补收。"
         : "票数仅主持人可见，公布后同步到投票器。";
-    $("turnout-label").textContent =
-      p.phase === "published" ? "最终参与统计" : "实时参与进度";
-    $("turnout-detail").textContent = `${totalVotes} 票 / ${onlineCount} 台在线`;
+    if (batch) {
+      $("result-caption").textContent = `本题已收 ${p.total} 票 · ${$("result-caption").textContent}`;
+    }
+
+    const result = modeResult(p);
+    $("live-result-summary").hidden = !result;
+    $("live-result-summary").textContent = result;
+
+    $("turnout-label").textContent = p.phase === "published" ? "本题最终统计" : "本题参与进度";
+    $("turnout-detail").textContent = `${p.total} 票 / ${onlineCount} 台在线`;
 
     const maxVotes = Math.max(...(p.counts || [0]));
     const winners = p.counts ? p.counts.filter((c) => c === maxVotes).length : 0;
@@ -859,10 +1349,12 @@ function render() {
       ...p.options.map((option, i) => {
         const cnt = p.counts[i];
         const percent = p.total ? (cnt * 100) / p.total : 0;
+        const isCorrect = p.mode === "quiz" && p.correct_choice === i;
         const leading = p.total > 0 && cnt === maxVotes;
 
         const row = document.createElement("div");
         row.className = `result${leading ? " leading" : ""}`;
+        if (isCorrect) row.dataset.correct = "";
 
         const top = document.createElement("div");
         top.className = "result-top";
@@ -879,7 +1371,12 @@ function render() {
         title.textContent = option;
 
         labelBox.append(badge, title);
-        if (leading) {
+        if (isCorrect) {
+          const tag = document.createElement("span");
+          tag.className = "correct-tag";
+          tag.textContent = "正确答案 ✓";
+          labelBox.append(tag);
+        } else if (leading) {
           const tag = document.createElement("span");
           tag.className = "leader-tag";
           tag.textContent =
@@ -920,112 +1417,23 @@ function render() {
 
   if (!editingAliasDevice || !state.devices.some((d) => d.id === editingAliasDevice)) {
     editingAliasDevice = null;
-    renderDevices();
+    renderDevices(batch);
   }
-  renderStage(p, onlineCount);
+  renderStage(p, batch, onlineCount);
   updateButtons();
 }
 
-/* ==================== 历史投票抽屉 ==================== */
-async function openHistory() {
-  $("history-backdrop").hidden = false;
-  $("history-drawer").hidden = false;
-  $("history-list").innerHTML = '<p class="history-empty">正在读取本场投票记录…</p>';
-  try {
-    const res = await fetch("/api/history", { cache: "no-store" });
-    if (!res.ok) throw Error();
-    const { polls } = await res.json();
-    if (!polls.length) {
-      $("history-list").innerHTML = '<p class="history-empty">本场还没有发起过投票。</p>';
-      return;
-    }
-    $("history-list").replaceChildren(
-      ...polls.map((item) => {
-        const card = document.createElement("article");
-        card.className = "history-card";
-
-        const meta = document.createElement("div");
-        meta.className = "history-meta";
-        const time = document.createElement("span");
-        time.textContent = item.created_ms ? beijingShort.format(item.created_ms) : "";
-        const badge = document.createElement("span");
-        badge.textContent = `${PHASES[item.phase] || item.phase} · 共 ${item.total} 票`;
-        meta.append(time, badge);
-
-        const h4 = document.createElement("h4");
-        h4.textContent = item.title;
-
-        const bars = document.createElement("div");
-        bars.className = "history-bars";
-        item.options.forEach((opt, idx) => {
-          const cnt = item.counts[idx] || 0;
-          const pct = item.total ? (cnt * 100) / item.total : 0;
-          const row = document.createElement("div");
-          row.className = "history-bar-row";
-          const name = document.createElement("span");
-          name.textContent = `${String.fromCharCode(65 + idx)}. ${opt}`;
-          const val = document.createElement("b");
-          val.textContent = `${cnt} 票 (${pct.toFixed(1)}%)`;
-          const track = document.createElement("div");
-          track.className = "history-bar-track";
-          const fill = document.createElement("div");
-          fill.className = "history-bar-fill";
-          fill.style.width = `${pct}%`;
-          track.append(fill);
-          row.append(name, val, track);
-          bars.append(row);
-        });
-
-        const acts = document.createElement("div");
-        acts.className = "history-actions";
-
-        const reuse = document.createElement("button");
-        reuse.type = "button";
-        reuse.className = "mini-tool";
-        reuse.textContent = "复用为新题";
-        reuse.onclick = () => {
-          $("question").value = item.title;
-          $("question-count").textContent = `${[...item.title].length} / 60`;
-          setOptions(item.options);
-          closeHistory();
-          $("question").focus();
-          showToast("已载入到新建投票表单");
-        };
-
-        const copyBtn = document.createElement("button");
-        copyBtn.type = "button";
-        copyBtn.className = "mini-tool";
-        copyBtn.textContent = "复制文字";
-        copyBtn.onclick = () => copyText(formatResultText(item), "已复制投票结果文字");
-
-        const imgBtn = document.createElement("button");
-        imgBtn.type = "button";
-        imgBtn.className = "mini-tool";
-        imgBtn.textContent = "导出图片";
-        imgBtn.onclick = () => exportPollImage(item);
-
-        acts.append(reuse, copyBtn, imgBtn);
-        card.append(meta, h4, bars, acts);
-        return card;
-      }),
-    );
-  } catch {
-    $("history-list").innerHTML = '<p class="history-empty">暂时无法读取历史记录，请稍后重试。</p>';
-  }
-}
-
-function closeHistory() {
-  $("history-backdrop").hidden = true;
-  $("history-drawer").hidden = true;
-}
-
-/* ==================== 大屏切换 ==================== */
+/* ==================== 大屏模式切换 ==================== */
 function setStageOpen(open) {
   stageOpen = open;
   $("stage-overlay").hidden = !open;
   document.body.style.overflow = open ? "hidden" : "";
   if (open && state) {
-    renderStage(state.poll, state.devices.filter((d) => d.online).length);
+    renderStage(
+      activeLivePoll(),
+      state.batch?.polls,
+      state.devices.filter((d) => d.online).length,
+    );
   }
   if (window.pywebview?.api?.set_fullscreen) {
     window.pywebview.api.set_fullscreen(open);
@@ -1036,7 +1444,16 @@ function setStageOpen(open) {
   }
 }
 
-/* ==================== 轮询刷新 ==================== */
+function stepBatchQuestion(delta) {
+  const batch = state?.batch?.polls;
+  if (!batch || batch.length <= 1) return;
+  const picker = $("live-question");
+  const idx = Math.max(0, batch.findIndex((q) => q.id === picker.value));
+  picker.value = batch[(idx + delta + batch.length) % batch.length].id;
+  render();
+}
+
+/* ==================== 轮询与事件绑定 ==================== */
 async function refresh() {
   const sequence = ++refreshSequence;
   try {
@@ -1058,34 +1475,15 @@ async function refresh() {
   }
 }
 
-/* ==================== 事件绑定 ==================== */
-$("add-option").onclick = () => addOption("", true);
-addOption();
-addOption();
-
-$("question").oninput = () => {
-  $("question-count").textContent = `${[...$("question").value].length} / 60`;
-  checkLiveFontCoverage();
+$("add-question").onclick = () => addQuestion().focus();
+$("live-question").onchange = () => {
+  if (state) render();
 };
-
-document.querySelectorAll(".preset-chip").forEach((btn) => {
-  btn.onclick = () => {
-    const key = btn.dataset.preset;
-    if (key === "clear") {
-      $("question").value = "";
-      $("question-count").textContent = "0 / 60";
-      setOptions(["", ""]);
-      newDeadline.reset(null);
-      notice();
-      return;
-    }
-    const preset = PRESETS[key];
-    if (preset) {
-      setOptions(preset.options);
-      showToast("已应用快捷选项模板");
-    }
-  };
-});
+$("show-result").onclick = () => {
+  if (state?.batch) {
+    action("show_result", { batch_id: state.batch.id, poll_id: $("live-question").value });
+  }
+};
 
 $("copy-code").onclick = async () => {
   if (!state?.join_code) return;
@@ -1103,17 +1501,16 @@ $("copy-address").onclick = () => {
 };
 
 $("btn-copy-result").onclick = () => {
-  if (state?.poll) copyText(formatResultText(state.poll), "已复制投票结果文字");
+  const poll = activeLivePoll();
+  if (poll) copyText(formatResultText(poll), "已复制本题投票结果文字");
 };
-$("btn-export-png").onclick = () => exportPollImage(state?.poll);
-$("stage-export").onclick = () => exportPollImage(state?.poll);
-
-$("btn-history").onclick = openHistory;
-$("history-close").onclick = closeHistory;
-$("history-backdrop").onclick = closeHistory;
+$("btn-export-png").onclick = () => exportPollImage(activeLivePoll());
+$("stage-export").onclick = () => exportPollImage(activeLivePoll());
 
 $("btn-stage").onclick = () => setStageOpen(true);
 $("stage-exit").onclick = () => setStageOpen(false);
+$("stage-prev").onclick = () => stepBatchQuestion(-1);
+$("stage-next").onclick = () => stepBatchQuestion(1);
 $("stage-toggle-theme").onclick = () => {
   stageLight = !stageLight;
   $("stage-overlay").classList.toggle("light", stageLight);
@@ -1121,35 +1518,85 @@ $("stage-toggle-theme").onclick = () => {
 };
 $("stage-toggle-mask").onclick = () => {
   stageMaskCounts = !stageMaskCounts;
-  if (state) renderStage(state.poll, state.devices.filter((d) => d.online).length);
+  if (state) {
+    renderStage(
+      activeLivePoll(),
+      state.batch?.polls,
+      state.devices.filter((d) => d.online).length,
+    );
+  }
 };
 
-$("deadline-form").onsubmit = async (event) => {
-  event.preventDefault();
-  if (!editingPoll || state?.poll?.id !== editingPoll) return;
-  try {
-    if (await action("deadline", { poll_id: editingPoll, ...activeDeadline.value() })) {
-      $("edit-deadline").open = false;
-      if (state?.poll) activeDeadline.reset(state.poll.deadline_at_ms);
-      showToast("截止时间已更新");
+function readDraft(card, label) {
+  const mode = card.querySelector(".mode-select").value;
+  if (mode !== "single" && !state?.supports_modes) {
+    throw Error("请连接支持投票模式切换的主持服务。");
+  }
+  const custom = [...card.querySelectorAll(".options .option")];
+  const q = {
+    title: card.querySelector("textarea").value.trim(),
+    options: voteModes[mode].options || custom.map((row) => row.querySelector("input").value.trim()),
+  };
+  if (state?.supports_modes) q.mode = mode;
+  if (!q.title || q.options.some((option) => !option)) throw Error(`请补全${label}的题目和选项。`);
+  if (new Set(q.options).size !== q.options.length) throw Error(`${label}有重复选项。`);
+  if (coverage.length) {
+    const missing = findUnsupportedChars([q.title, ...q.options]);
+    if (missing.length) {
+      throw Error(`${label}的投票器字库暂不支持：${missing.slice(0, 12).join("")}。`);
     }
+  }
+  if (mode === "quiz") {
+    const answer = card.querySelector(".correct-choice").value;
+    q.correct_choice = custom.findIndex((row) => row.dataset.choice === answer);
+    if (q.correct_choice < 0) throw Error(`请选择${label}的正确答案。`);
+  }
+  return q;
+}
+
+addQuestion();
+
+$("poll-form").onsubmit = (event) => {
+  event.preventDefault();
+  try {
+    const questions = [...$("questions").children].map((card, i) =>
+      readDraft(card, `第 ${i + 1} 题`),
+    );
+    const settings = { ...newDeadline.value(), previous_id: state?.poll?.id ?? null };
+    if (questions.length === 1) action("create", { ...questions[0], ...settings });
+    else if (questions.length <= (state?.max_batch_polls || 1)) {
+      action("create_batch", { questions, ...settings });
+    } else notice("请连接支持批量发题的主持台。");
   } catch (error) {
     notice(error.message);
   }
 };
 
-$("poll-form").onsubmit = (event) => {
+$("append-form").onsubmit = async (event) => {
   event.preventDefault();
-  const title = $("question").value.trim();
-  const options = [...$("options").querySelectorAll("input")].map((i) => i.value.trim());
-  const unsupported = findUnsupportedChars([title, ...options]);
-  if (coverage.length && unsupported.length) {
-    return notice(
-      `投票器字库暂不支持：${unsupported.slice(0, 12).join("")}，请换成常用汉字或英文。`,
-    );
-  }
+  if ($("append-submit").disabled || appendBatch !== state?.poll?.id) return;
   try {
-    action("create", { title, options, ...newDeadline.value() });
+    const question = readDraft($("append-question").firstElementChild, "追加题目");
+    const key = JSON.stringify([appendBatch, question]);
+    if (appendAttempt?.key !== key) {
+      const bytes = crypto.getRandomValues(new Uint8Array(8));
+      appendAttempt = {
+        key,
+        id: Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(""),
+      };
+    }
+    const target = appendBatch;
+    if (
+      (await action("append_question", {
+        batch_id: target,
+        question_id: appendAttempt.id,
+        ...question,
+      })) &&
+      appendBatch === target
+    ) {
+      resetAppend(target);
+      updateButtons();
+    }
   } catch (error) {
     notice(error.message);
   }
@@ -1164,27 +1611,36 @@ document.addEventListener("keydown", (event) => {
   const tag = document.activeElement?.tagName;
   const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-    if (!$("start").disabled && !stageOpen) {
+    if (!stageOpen && !$("poll-form").hidden && !$("start").disabled) {
       event.preventDefault();
       $("poll-form").requestSubmit();
+    } else if (!stageOpen && !$("append-form").hidden && !$("append-submit").disabled) {
+      event.preventDefault();
+      $("append-form").requestSubmit();
     }
     return;
   }
-  if (event.key === "Escape") {
-    if (stageOpen) {
-      setStageOpen(false);
-    } else if (!$("history-drawer").hidden) {
-      closeHistory();
-    }
+  if (event.key === "Escape" && stageOpen) {
+    setStageOpen(false);
     return;
   }
-  if (!typing && (event.key === "f" || event.key === "F") && !event.metaKey && !event.ctrlKey && !event.altKey) {
+  if (stageOpen && !typing && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    event.preventDefault();
+    stepBatchQuestion(event.key === "ArrowLeft" ? -1 : 1);
+    return;
+  }
+  if (
+    !typing &&
+    (event.key === "f" || event.key === "F") &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey
+  ) {
     event.preventDefault();
     setStageOpen(!stageOpen);
   }
 });
 
-// 定时题秒级顺滑倒计时刷新（无需额外请求后端）
 setInterval(() => {
   if (state?.poll?.phase === "open" && state.poll.deadline_at_ms) {
     renderDeadline(state.poll);
@@ -1195,7 +1651,7 @@ fetch("/font-coverage.json")
   .then((r) => r.json())
   .then((data) => {
     coverage = data.ranges;
-    checkLiveFontCoverage();
+    document.querySelectorAll(".draft-question").forEach(checkCardFont);
   })
   .catch(() => notice("字库清单未加载，请刷新页面。"));
 
