@@ -113,7 +113,7 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(reply), 23)
                 self.assertEqual(reply[:12], b"GXH2" + nonce)
                 self.assertEqual(reply[22], 0)
-                host.set_open_join(60)
+                host.set_open_join(300)
                 reply_open = await asyncio.to_thread(probe, port, nonce)
                 self.assertEqual(len(reply_open), 23)
                 self.assertEqual(reply_open[22], 1)

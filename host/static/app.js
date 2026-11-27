@@ -1341,6 +1341,14 @@ function renderDevices(batch) {
   }
 }
 
+const OPEN_JOIN_SECONDS = 300;
+
+function formatOpenJoinCountdown(seconds) {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
 function renderOpenJoin() {
   const btn = $("open-join-btn");
   if (!state?.supports_open_join) {
@@ -1353,7 +1361,7 @@ function renderOpenJoin() {
   const seconds = Math.ceil(leftMs / 1000);
   const active = seconds > 0;
   btn.classList.toggle("active", active);
-  $("open-join-text").textContent = active ? `一键入场 ${seconds}s` : "一键入场";
+  $("open-join-text").textContent = active ? `一键入场 ${formatOpenJoinCountdown(seconds)}` : "一键入场";
   $("session-sub").textContent = active
     ? "一键入场开放中：投票器长按确定即可免输码加入（再点关闭）"
     : "投票器可本机输码或点一键入场 · 同局域网自动发现";
@@ -1614,9 +1622,9 @@ $("show-result").onclick = () => {
 $("open-join-btn").onclick = async () => {
   if (!state?.supports_open_join || busy) return;
   const active = state.open_join_until_ms && state.server_now_ms && state.open_join_until_ms > hostNow();
-  const seconds = active ? 0 : 60;
+  const seconds = active ? 0 : OPEN_JOIN_SECONDS;
   if (await action("open_join", { seconds })) {
-    showToast(seconds ? "已开放 60 秒一键入场，投票器长按确定可免输码加入" : "已关闭一键入场");
+    showToast(seconds ? "已开放 5 分钟一键入场，投票器长按确定可免输码加入" : "已关闭一键入场");
   }
 };
 

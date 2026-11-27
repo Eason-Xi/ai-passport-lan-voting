@@ -913,7 +913,7 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("一键入场", rejected["message"])
 
         # 非法时长与跨站请求拒绝。
-        async with self.session.post(self.base + "/api/open_join", json={"seconds": 60}) as response:
+        async with self.session.post(self.base + "/api/open_join", json={"seconds": 300}) as response:
             self.assertEqual(response.status, 403)
         for bad in (-1, 5, 301, "60", True):
             async with self.session.post(
@@ -923,12 +923,13 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
             ) as response:
                 self.assertEqual(response.status, 400)
 
-        # 开启 60 秒窗口：免输码握手通过并下发当前 6 位入场码。
-        await self.action("open_join", {"seconds": 60})
+        # 默认开启 5 分钟（300 秒）窗口：免输码握手通过并下发当前 6 位入场码。
+        await self.action("open_join", {})
         async with self.session.get(self.base + "/api/state") as response:
             live = await response.json()
             self.assertTrue(live["supports_open_join"])
-            self.assertGreater(live["open_join_remaining_ms"], 0)
+            self.assertGreater(live["open_join_remaining_ms"], 290_000)
+            self.assertLessEqual(live["open_join_remaining_ms"], 300_000)
             self.assertIsNotNone(live["open_join_until_ms"])
 
         ws_open = await self.session.ws_connect(self.base.replace("http", "ws") + "/ws")

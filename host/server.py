@@ -45,7 +45,7 @@ FIXED_OPTIONS = {
 INSERT_OPEN_POLL = """INSERT INTO polls (id,title,options,mode,correct_choice,phase,created,deadline_at_ms,batch_id)
                       VALUES (?,?,?,?,?,'open',?,?,?)"""
 MAX_DEADLINE_MS = 253402300799999  # 公历 9999 年末的 Unix 毫秒数。
-OPEN_JOIN_DEFAULT_SECONDS = 60
+OPEN_JOIN_DEFAULT_SECONDS = 300
 OPEN_JOIN_MAX_SECONDS = 300
 DISCOVERY_PORT = 48765
 DISCOVERY_NETWORKS = tuple(map(ipaddress.IPv4Network, ("10.0.0.0/8", "172.16.0.0/12",
