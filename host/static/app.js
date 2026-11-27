@@ -8,6 +8,8 @@ let stateAt = 0;
 let refreshSequence = 0;
 let editingPoll = null;
 let editingAliasDevice = null;
+let deviceLimitDirty = false;
+let renderedDevices = null;
 let stageOpen = false;
 let stageLight = false;
 let stageMaskCounts = true;
@@ -480,39 +482,45 @@ async function exportPollImage(poll) {
 
 /* ==================== 投票历史归档面板 ==================== */
 let historyHead;
+let historyCount;
 let historyBefore = null;
 let historyRequest = 0;
+const historyDeleteDialog = $("history-delete-dialog");
+let historyToDelete = null;
+
+function historyDeleteError(message = "") {
+  $("history-delete-error").textContent = message;
+  $("history-delete-error").hidden = !message;
+}
+
+function confirmHistoryDelete(report) {
+  if (!state?.supports_history_delete || busy) return;
+  historyToDelete = report.id;
+  $("history-delete-detail").textContent =
+    `删除「${report.title}」的历史归档？删除后，该场统计无法从历史中查看、复用或下载。`;
+  historyDeleteError();
+  historyDeleteDialog.showModal();
+}
+
+$("history-delete-cancel").onclick = () => historyDeleteDialog.close();
+historyDeleteDialog.addEventListener("cancel", (event) => {
+  if (busy) event.preventDefault();
+});
+historyDeleteDialog.onclose = () => { historyToDelete = null; };
+$("history-delete-form").onsubmit = async (event) => {
+  event.preventDefault();
+  if (!historyToDelete || $("history-delete-submit").disabled) return;
+  historyDeleteError();
+  if (await action("history_delete", {batch_id: historyToDelete}, historyDeleteError)) {
+    historyDeleteDialog.close();
+    showToast("投票历史已删除");
+  }
+};
 
 function loadQuestionsIntoEditor(questions) {
   if (!questions?.length) return;
   $("questions").replaceChildren();
-  questions.forEach((q) => {
-    const card = makeQuestionCard();
-    card.querySelector(".remove-question").onclick = () => {
-      if ($("questions").children.length <= 1) return;
-      card.remove();
-      numberQuestions();
-    };
-    const titleEl = card.querySelector("textarea");
-    titleEl.value = q.title || "";
-    card.querySelector(".question-label span").textContent = `${[...titleEl.value].length} / 60`;
-    const mode = voteModes[q.mode] ? q.mode : "single";
-    card.querySelector(".mode-select").value = mode;
-    if (!voteModes[mode].options && Array.isArray(q.options)) {
-      const optBox = card.querySelector(".options");
-      optBox.replaceChildren();
-      q.options.slice(0, 6).forEach((text) => addOption(card, text));
-      while (optBox.children.length < 2) addOption(card, "");
-    }
-    updateQuestionMode(card);
-    if (mode === "quiz" && Number.isInteger(q.correct_choice)) {
-      const rows = card.querySelectorAll(".options .option");
-      const target = rows[q.correct_choice];
-      if (target) card.querySelector(".correct-choice").value = target.dataset.choice;
-    }
-    checkCardFont(card);
-    $("questions").append(card);
-  });
+  questions.forEach(appendDraftCard);
   numberQuestions();
   preparingNext = true;
   updateButtons();
@@ -591,7 +599,14 @@ function historyEntry(report) {
       reuseBtn.textContent = "复用本场题目";
       reuseBtn.onclick = () => loadQuestionsIntoEditor(detail.questions);
 
-      tools.append(download, reuseBtn);
+      const deleteBtn = document.createElement("button");
+      deleteBtn.type = "button";
+      deleteBtn.className = "mini-tool history-delete-button";
+      deleteBtn.hidden = !state?.supports_history_delete;
+      deleteBtn.textContent = "删除记录";
+      deleteBtn.onclick = () => confirmHistoryDelete(report);
+
+      tools.append(download, reuseBtn, deleteBtn);
       toolbar.append(times, tools);
       body.append(toolbar);
 
@@ -659,7 +674,7 @@ async function loadHistory(before = null) {
     $("history-more").hidden = historyBefore === null;
     $("history-status").textContent = list.childElementCount
       ? ""
-      : "尚无已结束的投票。收票结束后，统计会自动保存在这里。";
+      : "暂无投票历史。收票结束后，统计会自动保存在这里。";
   } catch {
     if (serial !== historyRequest) return;
     $("history-status").textContent = "暂时无法读取投票历史。";
@@ -860,8 +875,25 @@ function updateQuestionMode(card) {
   checkCardFont(card);
 }
 
+function fillQuestionCard(card, question) {
+  const title = card.querySelector("textarea");
+  title.value = question.title || "";
+  title.oninput();
+  const mode = voteModes[question.mode] ? question.mode : "single";
+  card.querySelector(".mode-select").value = mode;
+  const options = card.querySelector(".options");
+  options.replaceChildren();
+  if (!voteModes[mode].options && Array.isArray(question.options)) {
+    question.options.slice(0, 6).forEach((option) => addOption(card, option));
+  }
+  while (options.children.length < 2) addOption(card);
+  updateQuestionMode(card);
+  const answer = options.children[question.correct_choice];
+  if (mode === "quiz" && answer) card.querySelector(".correct-choice").value = answer.dataset.choice;
+}
+
 let questionSerial = 0;
-function makeQuestionCard() {
+function makeQuestionCard(question) {
   const card = $("question-template").content.firstElementChild.cloneNode(true);
   const title = card.querySelector("textarea");
   const label = card.querySelector(".question-label");
@@ -877,20 +909,30 @@ function makeQuestionCard() {
   guide.id = title.id + "-mode-guide";
   mode.setAttribute("aria-describedby", guide.id);
   mode.onchange = () => updateQuestionMode(card);
-  addOption(card);
-  addOption(card);
-  updateQuestionMode(card);
+  card.querySelector(".save-library-draft").onclick = () => {
+    try {
+      openLibraryEditor(null, readDraft(card, "这道题"));
+    } catch (error) {
+      notice(error.message);
+    }
+  };
+  fillQuestionCard(card, question || {});
   return card;
 }
 
-function addQuestion() {
-  const card = makeQuestionCard();
+function appendDraftCard(question) {
+  const card = makeQuestionCard(question);
   card.querySelector(".remove-question").onclick = () => {
     if ($("questions").children.length <= 1) return;
     card.remove();
     numberQuestions();
   };
   $("questions").append(card);
+  return card;
+}
+
+function addQuestion(question) {
+  const card = appendDraftCard(question);
   numberQuestions();
   return card.querySelector("textarea");
 }
@@ -907,8 +949,8 @@ let appendBatch = null;
 let appendAttempt = null;
 let preparingNext = false;
 
-function resetAppend(batchId) {
-  const card = makeQuestionCard();
+function resetAppend(batchId, question) {
+  const card = makeQuestionCard(question);
   card.querySelector(".remove-question").remove();
   card.querySelector(".question-label").firstChild.textContent = "追加题目";
   $("append-question").replaceChildren(card);
@@ -978,7 +1020,7 @@ $("use-append-draft").onclick = () => {
 };
 
 /* ==================== 后端交互 ==================== */
-async function action(name, body) {
+async function action(name, body, onError = notice) {
   if (!state || busy) return false;
   busy = true;
   updateButtons();
@@ -1010,7 +1052,7 @@ async function action(name, body) {
     await refresh();
     return true;
   } catch (error) {
-    notice(error instanceof TypeError ? "暂时无法连接主持服务，请保留当前内容后重试。" : error.message);
+    onError(error instanceof TypeError ? "暂时无法连接主持服务，请保留当前内容后重试。" : error.message);
     return false;
   } finally {
     busy = false;
@@ -1026,6 +1068,21 @@ function activeLivePoll() {
 
 function updateButtons() {
   updateEditor();
+  $("history-delete-submit").disabled = busy || !state?.supports_history_delete;
+  $("history-delete-cancel").disabled = busy;
+  document.querySelectorAll(".history-delete-button").forEach((button) => {
+    button.hidden = !state?.supports_history_delete;
+    button.disabled = busy;
+  });
+  $("library-open").hidden = !state?.supports_question_library;
+  $("library-open").disabled = busy;
+  $("library-save").disabled = busy || !state?.supports_question_library;
+  document.querySelectorAll(".save-library-draft").forEach((button) => {
+    button.hidden = !state?.supports_question_library;
+    button.disabled = busy;
+  });
+  $("device-limit").disabled = !state?.device_limit_max || busy;
+  $("save-device-limit").disabled = $("device-limit").disabled;
   document.querySelectorAll(".question-mode").forEach((control) => {
     control.hidden = !state?.supports_modes;
   });
@@ -1059,6 +1116,7 @@ function updateButtons() {
 function renderStage(p, batch, onlineCount) {
   $("stage-code").textContent = state.join_code;
   $("stage-online").textContent = String(onlineCount);
+  $("stage-device-limit").textContent = ` / ${state.max_devices || 10}`;
   const totalShown = batch ? batch.reduce((s, q) => s + q.total, 0) : p?.total || 0;
   $("stage-votes").textContent = String(totalShown);
   $("stage-phase-text").textContent = p ? PHASES[p.phase] : "等待发起";
@@ -1149,7 +1207,6 @@ function renderStage(p, batch, onlineCount) {
 }
 
 function renderDevices(batch) {
-  $("device-count").textContent = `${state.devices.length} 台已登记`;
   $("device-list").replaceChildren(
     ...state.devices.map((d) => {
       const box = document.createElement("div");
@@ -1255,8 +1312,9 @@ function renderDevices(batch) {
 }
 
 function render() {
-  if (state.latest_report !== historyHead) {
+  if (state.latest_report !== historyHead || state.history_count !== historyCount) {
     historyHead = state.latest_report;
+    historyCount = state.history_count;
     loadHistory();
   }
   const batch = state.batch?.polls;
@@ -1285,7 +1343,16 @@ function render() {
   $("current-report").hidden = !p || p.phase === "open" || state.latest_report !== state.poll.id;
   $("join-code").textContent = state.join_code;
   $("online").textContent = String(onlineCount);
+  $("online-sub").textContent = `最多 ${maxDevices} 台`;
+  $("online-limit").textContent = ` / ${maxDevices} 台`;
   $("online-bar").style.width = `${Math.min(100, (onlineCount / maxDevices) * 100)}%`;
+  $("device-count").textContent = `已登记 ${state.devices.length} / ${maxDevices} 台`;
+  $("device-limit-form").hidden = !state.device_limit_max;
+  if (state.device_limit_max) {
+    $("device-limit").max = state.device_limit_max;
+    if (!deviceLimitDirty) $("device-limit").value = maxDevices;
+    $("device-limit-help").textContent = `范围 1～${state.device_limit_max} 台。离线设备也占登记名额。`;
+  }
 
   $("votes-label").textContent = batch ? "本组已收票" : "本题已收票";
   const totalVotes = batch ? batch.reduce((sum, q) => sum + q.total, 0) : p?.total || 0;
@@ -1417,7 +1484,11 @@ function render() {
 
   if (!editingAliasDevice || !state.devices.some((d) => d.id === editingAliasDevice)) {
     editingAliasDevice = null;
-    renderDevices(batch);
+    const listState = JSON.stringify([batch?.length || 1, state.devices]);
+    if (renderedDevices !== listState) {
+      renderDevices(batch);
+      renderedDevices = listState;
+    }
   }
   renderStage(p, batch, onlineCount);
   updateButtons();
@@ -1554,6 +1625,140 @@ function readDraft(card, label) {
   return q;
 }
 
+function newQuestionId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+const libraryDialog = $("question-library");
+let libraryEdit = null;
+let libraryRequest = 0;
+
+function libraryStatus(message = "") {
+  $("library-status").textContent = message;
+  $("library-status").hidden = !message;
+}
+
+function hasQuestionDraft(card) {
+  return card && (card.querySelector(".mode-select").value !== "single" ||
+    [...card.querySelectorAll("textarea, .options input")].some((input) => input.value.trim()));
+}
+
+function useLibraryQuestion(question) {
+  if (!state || busy) return;
+  let title;
+  if (!$("append-form").hidden) {
+    const poll = state.poll;
+    const card = $("append-question").firstElementChild;
+    if (poll?.phase !== "open" || (state.batch?.polls.length || 1) >= state.max_batch_polls) {
+      libraryStatus("本场无法再追加题目。可切换到「准备下一场投票」后选用。");
+      return;
+    }
+    if (hasQuestionDraft(card) && !window.confirm("替换本场正在编辑的追加题目草稿？")) return;
+    resetAppend(poll.id, question);
+    title = $("append-question").querySelector("textarea");
+    updateButtons();
+  } else {
+    const emptyCard = [...$("questions").children].find((card) => !hasQuestionDraft(card));
+    if (emptyCard) {
+      fillQuestionCard(emptyCard, question);
+      title = emptyCard.querySelector("textarea");
+    } else if (!$("add-question").disabled) {
+      title = addQuestion(question);
+    } else {
+      libraryStatus("新建投票的草稿已满，请腾出一个题目名额后再选用。");
+      return;
+    }
+  }
+  libraryDialog.close();
+  title.focus();
+  showToast("题目已载入投票草稿");
+}
+
+function libraryEntry(question) {
+  const entry = document.createElement("article");
+  const detail = document.createElement("div");
+  const heading = document.createElement("h3");
+  heading.textContent = question.title;
+  const choices = document.createElement("p");
+  choices.className = "help";
+  choices.textContent = question.options.join(" / ");
+  detail.append(heading, choices);
+  const actions = document.createElement("div");
+  actions.className = "library-actions";
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "secondary";
+  edit.textContent = "编辑题目";
+  edit.onclick = () => openLibraryEditor(question);
+  const use = document.createElement("button");
+  use.type = "button";
+  use.className = "primary";
+  use.textContent = "选用题目";
+  use.onclick = () => useLibraryQuestion(question);
+  actions.append(edit, use);
+  entry.append(detail, actions);
+  return entry;
+}
+
+async function showLibrary(message = "") {
+  const request = ++libraryRequest;
+  if (!libraryDialog.open) libraryDialog.showModal();
+  libraryEdit = null;
+  $("library-question").replaceChildren();
+  $("library-title").textContent = "本机题库";
+  $("library-form").hidden = true;
+  $("library-browser").hidden = false;
+  $("library-list").replaceChildren();
+  libraryDialog.scrollTop = 0;
+  libraryStatus("正在读取题库…");
+  try {
+    const response = await fetch("/api/question_library", {cache: "no-store"});
+    if (!response.ok) throw Error();
+    const {questions} = await response.json();
+    if (!libraryDialog.open || request !== libraryRequest) return;
+    $("library-list").replaceChildren(...questions.map(libraryEntry));
+    libraryStatus(message || (questions.length ? "" : "还没有保存的题目。点击「新建题目」添加。"));
+  } catch {
+    if (libraryDialog.open && request === libraryRequest) libraryStatus("题库暂时无法读取，请关闭后重试。");
+  }
+}
+
+function openLibraryEditor(question, initial = question) {
+  libraryRequest++;
+  const card = makeQuestionCard(initial);
+  card.querySelector(".remove-question").remove();
+  card.querySelector(".save-library-draft").remove();
+  libraryEdit = question ? {id: question.id, revision: question.revision} : {id: newQuestionId(), revision: null};
+  $("library-question").replaceChildren(card);
+  $("library-title").textContent = question ? "编辑题库题目" : "新建题库题目";
+  $("library-form").hidden = false;
+  $("library-browser").hidden = true;
+  libraryStatus();
+  if (!libraryDialog.open) libraryDialog.showModal();
+  libraryDialog.scrollTop = 0;
+  updateButtons();
+  card.querySelector("textarea").focus();
+}
+
+$("library-open").onclick = () => showLibrary();
+$("library-new").onclick = () => openLibraryEditor(null);
+$("library-back").onclick = () => { if (!busy) showLibrary(); };
+$("library-close").onclick = () => { if (!busy) libraryDialog.close(); };
+libraryDialog.addEventListener("cancel", (event) => { if (busy) event.preventDefault(); });
+$("library-form").onsubmit = async (event) => {
+  event.preventDefault();
+  if (!libraryEdit || $("library-save").disabled) return;
+  try {
+    const question = readDraft($("library-question").firstElementChild, "这道题");
+    if (await action("library_save", {...question, ...libraryEdit}, libraryStatus)) {
+      await showLibrary("题目已保存");
+    }
+  } catch (error) {
+    libraryStatus(error.message);
+  }
+};
+
 addQuestion();
 
 $("poll-form").onsubmit = (event) => {
@@ -1579,11 +1784,7 @@ $("append-form").onsubmit = async (event) => {
     const question = readDraft($("append-question").firstElementChild, "追加题目");
     const key = JSON.stringify([appendBatch, question]);
     if (appendAttempt?.key !== key) {
-      const bytes = crypto.getRandomValues(new Uint8Array(8));
-      appendAttempt = {
-        key,
-        id: Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(""),
-      };
+      appendAttempt = {key, id: newQuestionId()};
     }
     const target = appendBatch;
     if (
@@ -1604,10 +1805,21 @@ $("append-form").onsubmit = async (event) => {
 
 $("close").onclick = () => action("close", { poll_id: state?.poll?.id });
 $("publish").onclick = () => action("publish", { poll_id: state?.poll?.id });
+$("device-limit").oninput = () => { deviceLimitDirty = true; };
+$("device-limit-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const limit = $("device-limit").valueAsNumber;
+  if (await action("device_limit", { limit })) {
+    deviceLimitDirty = false;
+    $("device-limit").value = state?.max_devices ?? limit;
+    showToast(`已保存设备上限 ${limit} 台`);
+  }
+};
 $("stage-close").onclick = () => action("close", { poll_id: state?.poll?.id });
 $("stage-publish").onclick = () => action("publish", { poll_id: state?.poll?.id });
 
 document.addEventListener("keydown", (event) => {
+  if (libraryDialog.open || historyDeleteDialog.open) return;
   const tag = document.activeElement?.tagName;
   const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {

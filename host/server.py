@@ -32,7 +32,8 @@ def resolve_static_dir() -> Path:
 
 
 STATIC = resolve_static_dir()
-MAX_DEVICES = 10
+DEFAULT_DEVICE_LIMIT = 10
+MAX_DEVICE_LIMIT = 200
 MAX_ALIAS_LENGTH = 20
 MAX_MESSAGE = 4096
 MAX_BATCH_POLLS = 50
@@ -135,7 +136,8 @@ class Store:
             CREATE TABLE IF NOT EXISTS polls (
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, options TEXT NOT NULL,
                 phase TEXT NOT NULL, created REAL NOT NULL, deadline_at_ms INTEGER, batch_id TEXT,
-                mode TEXT NOT NULL DEFAULT 'single', correct_choice INTEGER
+                mode TEXT NOT NULL DEFAULT 'single', correct_choice INTEGER,
+                history_deleted INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS votes (
                 poll_id TEXT NOT NULL, device_id TEXT NOT NULL, choice INTEGER NOT NULL,
@@ -145,6 +147,10 @@ class Store:
                 batch_id TEXT PRIMARY KEY, title TEXT NOT NULL, started_at_ms INTEGER NOT NULL, ended_at_ms INTEGER,
                 question_count INTEGER NOT NULL, participants INTEGER NOT NULL, total_votes INTEGER NOT NULL,
                 questions TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS question_library (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, options TEXT NOT NULL, mode TEXT NOT NULL,
+                correct_choice INTEGER, revision INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
             );
         """)
         with self.db:
@@ -158,12 +164,14 @@ class Store:
                 self.db.execute("ALTER TABLE polls ADD COLUMN mode TEXT NOT NULL DEFAULT 'single'")
             if "correct_choice" not in columns:
                 self.db.execute("ALTER TABLE polls ADD COLUMN correct_choice INTEGER")
+            if "history_deleted" not in columns:
+                self.db.execute("ALTER TABLE polls ADD COLUMN history_deleted INTEGER NOT NULL DEFAULT 0")
             self.db.execute("UPDATE polls SET batch_id=id WHERE batch_id IS NULL")
             self.db.execute("CREATE INDEX IF NOT EXISTS polls_by_batch ON polls(batch_id)")
             # 旧版保留了原票和题目，但没有记录实际截止时刻。
             for batch in self.db.execute("""
                 SELECT p.* FROM polls p LEFT JOIN poll_reports r ON r.batch_id=p.id
-                WHERE p.id=p.batch_id AND p.phase IN ('closed','published') AND r.batch_id IS NULL
+                WHERE p.id=p.batch_id AND p.phase IN ('closed','published') AND r.batch_id IS NULL AND p.history_deleted=0
                 ORDER BY p.rowid
             """).fetchall():
                 self._save_report(batch, None)
@@ -216,6 +224,48 @@ class Store:
         # 批次用首题编号标识，按插入顺序定位，避免电脑校时改变当前场次。
         return self.db.execute("SELECT * FROM polls WHERE id=(SELECT batch_id FROM polls ORDER BY rowid DESC LIMIT 1)").fetchone()
 
+    def library_questions(self) -> list[dict]:
+        rows = self.db.execute("""
+            SELECT id,title,options,mode,correct_choice,revision FROM question_library ORDER BY updated_at_ms DESC,rowid DESC
+        """)
+        questions = []
+        for row in rows:
+            question = dict(row)
+            question["options"] = json.loads(question["options"])
+            questions.append(question)
+        return questions
+
+    def save_library_question(self, data: dict):
+        question_id = data.get("id")
+        revision = data.get("revision")
+        if not isinstance(question_id, str) or not re.fullmatch(r"[0-9a-f]{16}", question_id):
+            raise ValueError("题库编号无效")
+        if revision is not None and (type(revision) is not int or revision < 1):
+            raise ValueError("题库版本无效")
+        entry = read_question(data)
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            current = self.db.execute(
+                "SELECT title,options,mode,correct_choice,revision FROM question_library WHERE id=?", (question_id,)
+            ).fetchone()
+            if current is None:
+                if revision is not None:
+                    raise ValueError("找不到这道题，请返回题库再试")
+                self.db.execute("""
+                    INSERT INTO question_library(id,title,options,mode,correct_choice,revision,updated_at_ms)
+                    VALUES (?,?,?,?,?,1,?)
+                """, (question_id, *entry, clock_ms()))
+                return
+            if tuple(current)[:-1] == entry:
+                # 保持重试幂等，已经保存的同一内容不另建题目或增加版本。
+                return
+            if revision != current["revision"]:
+                raise ValueError("题库里的这道题已有新版本，请返回题库重新打开")
+            self.db.execute("""
+                UPDATE question_library SET title=?,options=?,mode=?,correct_choice=?,revision=revision+1,updated_at_ms=?
+                WHERE id=?
+            """, (*entry, clock_ms(), question_id))
+
     def _save_report(self, batch, ended_at_ms):
         questions = []
         for poll in self.db.execute("SELECT * FROM polls WHERE batch_id=? ORDER BY rowid", (batch["id"],)):
@@ -247,6 +297,18 @@ class Store:
             params = (before,)
         rows = [dict(row) for row in self.db.execute(query + " ORDER BY rowid DESC LIMIT 21", params)]
         return dict(reports=rows[:20], next_before=rows[19]["cursor"] if len(rows) > 20 else None)
+
+    def delete_report(self, batch_id: object):
+        if not isinstance(batch_id, str) or not re.fullmatch(r"[0-9a-f]{16}", batch_id):
+            raise ValueError("投票记录编号无效")
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            removed = self.db.execute("DELETE FROM poll_reports WHERE batch_id=?", (batch_id,)).rowcount
+            if removed:
+                # 保留当前投票的公布流程，并标记场次，避免旧库补档重新生成这份归档。
+                self.db.execute("UPDATE polls SET history_deleted=1 WHERE id=?", (batch_id,))
+            elif not self.db.execute("SELECT 1 FROM polls WHERE id=? AND history_deleted=1", (batch_id,)).fetchone():
+                raise ValueError("找不到可删除的历史记录")
 
     def report(self, batch_id):
         row = self.db.execute("""SELECT batch_id AS id, title, started_at_ms, ended_at_ms,
@@ -288,13 +350,30 @@ class Store:
                 return poll
         return poll
 
+    def device_limit(self) -> int:
+        row = self.db.execute("SELECT value FROM settings WHERE key='device_limit'").fetchone()
+        return int(row[0]) if row else DEFAULT_DEVICE_LIMIT
+
+    def set_device_limit(self, limit: object):
+        if type(limit) is not int or not 1 <= limit <= MAX_DEVICE_LIMIT:
+            raise ValueError(f"请输入 1～{MAX_DEVICE_LIMIT} 的整数作为设备上限")
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            registered = self.db.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
+            if limit < registered:
+                raise ValueError(f"已有 {registered} 台设备登记，设备上限不能更低。可先移除离线设备")
+            self.db.execute("INSERT INTO settings VALUES ('device_limit', ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(limit),))
+
     def register(self, device: str):
         if not re.fullmatch(r"[0-9a-f]{12}", device):
             raise ValueError("设备编号无效")
-        if not self.db.execute("SELECT 1 FROM devices WHERE id=?", (device,)).fetchone():
-            if self.db.execute("SELECT COUNT(*) FROM devices").fetchone()[0] >= MAX_DEVICES:
-                raise ValueError("本场最多登记 10 台设备，请先在主持端移除闲置设备")
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            if not self.db.execute("SELECT 1 FROM devices WHERE id=?", (device,)).fetchone():
+                limit = self.device_limit()
+                if self.db.execute("SELECT COUNT(*) FROM devices").fetchone()[0] >= limit:
+                    raise ValueError(f"本场设备已满，最多登记 {limit} 台")
             self.db.execute("INSERT INTO devices VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET seen=excluded.seen",
                             (device, time.time()))
 
@@ -614,7 +693,8 @@ class VotingService:
                         raise ValueError("协议无效")
                     if data.get("type") == "vote":
                         self.store.vote(device, data.get("poll_id"), data.get("choice"))
-                        await self.broadcast()
+                        # 收票期间每台设备只看自己的进度。只回执给提交者，避免并发时成倍推送。
+                        await self.send_state(device, ws)
                     elif data.get("type") == "view":
                         requested = data.get("poll_id")
                         if not isinstance(requested, str) or not re.fullmatch(r"[0-9a-f]{16}", requested):
@@ -664,10 +744,12 @@ class VotingService:
         latest_report = self.store.db.execute("SELECT batch_id FROM poll_reports ORDER BY rowid DESC LIMIT 1").fetchone()
         history_count = self.store.db.execute("SELECT COUNT(*) FROM poll_reports").fetchone()[0]
         state["latest_report"] = latest_report[0] if latest_report else None
-        state.update(join_code=self.store.join_code, nonce=self.admin_nonce, max_devices=MAX_DEVICES,
+        state.update(join_code=self.store.join_code, nonce=self.admin_nonce, max_devices=self.store.device_limit(),
+                     device_limit_max=MAX_DEVICE_LIMIT,
                      addresses=self.addresses, port=self.port, host_id=self.store.host_id,
                      discovery_available=self.discovery is not None, max_batch_polls=MAX_BATCH_POLLS,
-                     supports_append=True, supports_modes=True, history_count=history_count)
+                     supports_append=True, supports_modes=True, supports_question_library=True,
+                     supports_history_delete=True, history_count=history_count)
         current_id = state["poll"]["id"] if state["poll"] else ""
         answered = dict(self.store.db.execute("SELECT v.device_id, COUNT(*) FROM votes v JOIN polls p ON p.id=v.poll_id "
                                                "WHERE p.batch_id=? GROUP BY v.device_id", (current_id,)))
@@ -683,7 +765,12 @@ class VotingService:
         before = request.query.get("before")
         if before is not None and (not re.fullmatch(r"[1-9][0-9]{0,18}", before) or int(before) > 2**63 - 1):
             raise web.HTTPBadRequest(text="历史分页编号无效")
-        return web.json_response(self.store.history(int(before) if before is not None else None))
+        return web.json_response(self.store.history(int(before) if before is not None else None),
+                                 headers={"Cache-Control": "no-store"})
+
+    async def question_library(self, request):
+        self.admin_guard(request)
+        return web.json_response({"questions": self.store.library_questions()}, headers={"Cache-Control": "no-store"})
 
     async def history_detail(self, request):
         self.admin_guard(request)
@@ -693,8 +780,9 @@ class VotingService:
         if request.match_info.get("format") == "csv":
             name = f'vote-{report["id"]}.csv'
             return web.Response(body=report_csv(report), content_type="text/csv", charset="utf-8",
-                                headers={"Content-Disposition": f'attachment; filename="{name}"'})
-        return web.json_response(report)
+                                headers={"Content-Disposition": f'attachment; filename="{name}"',
+                                         "Cache-Control": "no-store"})
+        return web.json_response(report, headers={"Cache-Control": "no-store"})
 
     async def admin_action(self, request):
         self.admin_guard(request)
@@ -728,11 +816,17 @@ class VotingService:
                     self.store.db.execute("DELETE FROM devices WHERE id=?", (device,))
             elif action == "alias":
                 self.store.set_alias(data.get("device_id"), data.get("alias", ""))
+            elif action == "device_limit":
+                self.store.set_device_limit(data.get("limit"))
+            elif action == "library_save":
+                self.store.save_library_question(data)
+            elif action == "history_delete":
+                self.store.delete_report(data.get("batch_id"))
             else:
                 raise ValueError("操作无效")
             if action in ("create", "create_batch", "deadline", "close", "publish"):
                 self.deadline_changed.set()
-            if action == "alias":
+            if action in ("alias", "device_limit", "library_save", "history_delete"):
                 return web.json_response({"ok": True})
             sent = await self.broadcast()
             if action in ("create", "create_batch", "append_question"):
@@ -778,6 +872,7 @@ class VotingService:
         app = web.Application(client_max_size=128 * 1024)
         app.router.add_get("/ws", self.ws_device)
         app.router.add_get("/api/state", self.admin_state)
+        app.router.add_get("/api/question_library", self.question_library)
         app.router.add_get("/api/history", self.history_index)
         app.router.add_get("/api/history/{id:[0-9a-f]+}", self.history_detail)
         app.router.add_get("/api/history/{id:[0-9a-f]+}/{format:csv}", self.history_detail)

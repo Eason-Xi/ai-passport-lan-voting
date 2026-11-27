@@ -242,6 +242,121 @@ async function checkVoteModes(page) {
   await page.getByRole("button",{name:"公布整组结果"}).click();
   await page.locator("#phase").getByText("结果已公布").waitFor();
 }
+async function checkDeviceLimit(page) {
+  const field = page.getByRole("spinbutton", {name:"设备上限"});
+  await field.waitFor();
+  assert.equal(await field.inputValue(), "10");
+  await field.fill("64");
+  await page.waitForResponse(r => r.url() === base + "/api/state" && r.ok());
+  assert.equal(await field.inputValue(), "64");
+  await page.getByRole("button", {name:"保存上限"}).click();
+  await page.locator("#online-limit").getByText("/ 64 台", {exact:true}).waitFor();
+  await page.locator("#device-count").getByText("已登记 10 / 64 台", {exact:true}).waitFor();
+  await page.locator("#btn-stage").click();
+  await page.locator("#stage-device-limit").getByText("/ 64", {exact:true}).waitFor();
+  await page.locator("#stage-exit").click();
+  await page.reload();
+  await field.waitFor();
+  assert.equal(await field.inputValue(), "64");
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+}
+
+async function checkQuestionLibrary(page) {
+  const open = page.getByRole("button", {name:"题库", exact:true});
+  const library = page.getByRole("dialog", {name:/题库/});
+  const form = page.locator("#library-form");
+  const drafts = page.locator("#questions .draft-question");
+  const create = page.locator("#poll-form");
+  await open.click();
+  await library.getByText(/还没有保存的题目/).waitFor();
+  await library.getByRole("button", {name:"新建题目", exact:true}).click();
+  await form.getByLabel("投票题目").fill("哪种水果适合分享");
+  await form.getByLabel("投票模式").selectOption("quiz");
+  await form.getByLabel("选项 A", {exact:true}).fill("苹果");
+  await form.getByLabel("选项 B", {exact:true}).fill("香蕉");
+  await form.getByLabel("正确答案").selectOption({index:1});
+  await form.getByRole("button", {name:"保存题目"}).click();
+  await library.getByText("题目已保存", {exact:true}).waitFor();
+  await page.reload();
+  await open.click();
+  await library.getByRole("button", {name:"编辑题目"}).click();
+  assert.equal(await form.getByLabel("投票模式").inputValue(), "quiz");
+  await form.getByLabel("投票题目").fill("哪种常见水果颜色偏黄");
+  await form.getByLabel("正确答案").selectOption({index:2});
+  await form.getByRole("button", {name:"保存题目"}).click();
+  await library.getByRole("heading", {name:"哪种常见水果颜色偏黄"}).waitFor();
+  await library.getByRole("button", {name:"关闭题库"}).click();
+  await drafts.nth(0).getByLabel("投票题目").fill("临时安排");
+  await drafts.nth(0).getByLabel("选项 A", {exact:true}).fill("赞成");
+  await drafts.nth(0).getByLabel("选项 B", {exact:true}).fill("反对");
+  await drafts.nth(0).getByRole("button", {name:"存入题库"}).click();
+  await form.getByRole("button", {name:"保存题目"}).click();
+  await library.getByRole("heading", {name:"临时安排"}).waitFor();
+  const quiz = library.locator("article").filter({hasText:"哪种常见水果颜色偏黄"});
+  await quiz.getByRole("button", {name:"选用题目"}).click();
+  assert.equal(await drafts.nth(0).getByLabel("投票题目").inputValue(), "临时安排");
+  assert.equal(await drafts.nth(1).getByLabel("投票题目").inputValue(), "哪种常见水果颜色偏黄");
+  await create.getByRole("button", {name:"一次发起 2 题"}).click();
+  await page.locator("#phase").getByText("正在收票", {exact:true}).waitFor();
+  const append = page.locator("#append-form");
+  await append.getByLabel("追加题目").fill("已有追加草稿");
+  await open.click();
+  page.once("dialog", dialog => dialog.dismiss());
+  await quiz.getByRole("button", {name:"选用题目"}).click();
+  await library.getByRole("button", {name:"关闭题库"}).click();
+  assert.equal(await append.getByLabel("追加题目").inputValue(), "已有追加草稿");
+  await append.getByLabel("追加题目").fill("");
+  await open.click();
+  await quiz.getByRole("button", {name:"选用题目"}).click();
+  assert.equal(await append.getByLabel("追加题目").inputValue(), "哪种常见水果颜色偏黄");
+  await append.getByRole("button", {name:"追加并推送"}).click();
+  await page.waitForFunction(() => document.querySelector("#live-question").options.length === 3);
+  const {batch} = await (await fetch(base+"/api/state")).json();
+  assert.deepEqual(batch.polls.map(p=>p.correct_choice), [null, 1, 1]);
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+}
+
+async function checkHistoryDelete(page) {
+  const history = page.locator("#history-list");
+  const earlier = history.locator("details").filter({hasText:"周末团建，你更想去哪里？"});
+  const dialog = page.getByRole("dialog", {name:"删除投票记录"});
+  await earlier.locator("summary").click();
+  const remove = earlier.getByRole("button", {name:"删除记录"});
+  await remove.click();
+  await dialog.getByText(/周末团建，你更想去哪里？/).waitFor();
+  await dialog.getByRole("button", {name:"取消"}).click();
+  assert(await earlier.isVisible());
+
+  const observer = await browser.newPage();
+  try {
+    await observer.goto(base);
+    const copy = observer.locator("#history-list details").filter({hasText:"周末团建，你更想去哪里？"});
+    await copy.waitFor();
+    const previous = (await (await fetch(base+"/api/state")).json()).history_count;
+    await remove.click();
+    await dialog.getByRole("button", {name:"确认删除"}).click();
+    await earlier.waitFor({state:"detached"});
+    await copy.waitFor({state:"detached"});
+    const after = await (await fetch(base+"/api/state")).json();
+    assert.equal(after.history_count, previous-1);
+    assert.equal(after.poll.phase, "open");
+  } finally {
+    await observer.close();
+  }
+  await page.getByRole("button", {name:"整组截止收票"}).click();
+  await page.getByRole("link", {name:"本场统计已保存，查看统计"}).click();
+  const current = history.locator("details").filter({hasText:"临时安排"});
+  await current.getByRole("button", {name:"删除记录"}).click();
+  await dialog.getByRole("button", {name:"确认删除"}).click();
+  await current.waitFor({state:"detached"});
+  await page.getByRole("button", {name:"公布整组结果"}).click();
+  await page.locator("#phase").getByText("结果已公布", {exact:true}).waitFor();
+  await page.reload();
+  await history.locator("details").first().waitFor();
+  assert.equal(await earlier.count(), 0);
+  assert.equal(await current.count(), 0);
+}
+
 async function checkPhoneSetup() {
   const phone = await browser.newPage({ viewport: { width: 390, height: 844 } });
   phone.on("pageerror", e => errors.push(e.message));
@@ -445,6 +560,9 @@ async function run() {
   await checkTimedPoll(page);
   await checkBatch(page);
   await checkVoteModes(page);
+  await checkDeviceLimit(page);
+  await checkQuestionLibrary(page);
+  await checkHistoryDelete(page);
   await checkPhoneSetup();
   assert.deepEqual(errors, []);
   fs.writeFileSync(
@@ -469,6 +587,9 @@ async function run() {
           "批量增删题目、整批校验、按人进度、逐题计票、整组截止和结果展示",
           "收票中追加题目并推送、保留草稿和正在查看的题目、追加题进入本场历史",
           "逐题切换四种投票模式，混合发题、追加测验、查看实时统计和归档",
+          "直接设置设备上限，主持台和投屏同步更新，刷新后保留设置",
+          "本地题库新建、编辑、刷新后保留、从草稿保存、选用到批量与临时加题",
+          "投票历史删除确认、取消、另一窗口同步、刷新后保持删除和当前结果仍可公布",
           "发题后十个在线连接收到推送，截止即保存逐题统计，刷新可重看并下载 CSV",
           "固件配网页选网、自动模式、更正入场码、多会场选择和成功提示（无线接口使用测试数据）",
         ],

@@ -132,7 +132,7 @@
               <span>在线设备</span>
               <small id="online-sub">最多 10 台</small>
             </div>
-            <strong><b id="online">0</b><small> / 10 台</small></strong>
+            <strong><b id="online">0</b><small id="online-limit"> / 10 台</small></strong>
             <div class="mini-track" aria-hidden="true">
               <div class="mini-bar" id="online-bar"></div>
             </div>
@@ -165,7 +165,10 @@
               <h2 id="editor-title">新建投票</h2>
               <p class="panel-sub" id="editor-sub">支持单题或一次最多 50 题批量发起，可混用 4 种投票模式</p>
             </div>
-            <span class="pill">首票锁定</span>
+            <div class="editor-heading-actions">
+              <span class="pill">首票锁定</span>
+              <button type="button" id="library-open" class="secondary" hidden>题库</button>
+            </div>
           </div>
 
           <form id="poll-form">
@@ -332,6 +335,13 @@
           <span id="device-count" class="pill">0 台已登记</span>
         </div>
 
+        <form id="device-limit-form" class="device-limit-form" hidden>
+          <label for="device-limit">设备上限</label>
+          <input id="device-limit" type="number" min="1" step="1" required aria-describedby="device-limit-help" />
+          <button id="save-device-limit" class="secondary" type="submit">保存上限</button>
+          <p id="device-limit-help" class="help"></p>
+        </form>
+
         <div class="network">
           <div class="network-main">
             <span class="discovery-pill" id="discovery-pill">
@@ -397,7 +407,7 @@
           </div>
           <div class="stage-stat">
             <span>在线设备</span>
-            <strong><em id="stage-online">0</em> / 10</strong>
+            <strong><em id="stage-online">0</em><span id="stage-device-limit"> / 10</span></strong>
           </div>
           <div class="stage-stat">
             <span>已收票数</span>
@@ -444,6 +454,38 @@
       </div>
     </div>
 
+    <dialog id="question-library" class="panel question-library" aria-labelledby="library-title">
+      <div class="panel-heading">
+        <h2 id="library-title">本机题库</h2>
+        <button id="library-close" type="button" class="text-button">关闭题库</button>
+      </div>
+      <p id="library-status" class="help" role="status" hidden></p>
+      <div id="library-browser">
+        <button id="library-new" type="button" class="primary">新建题目</button>
+        <div id="library-list"></div>
+      </div>
+      <form id="library-form" hidden>
+        <div id="library-question"></div>
+        <div class="library-actions">
+          <button id="library-back" type="button" class="secondary">取消编辑</button>
+          <button id="library-save" type="submit" class="primary">保存题目</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="history-delete-dialog" class="panel history-delete-dialog"
+      aria-labelledby="history-delete-title" aria-describedby="history-delete-detail">
+      <form id="history-delete-form">
+        <h2 id="history-delete-title">删除投票记录</h2>
+        <p id="history-delete-detail"></p>
+        <p id="history-delete-error" class="help" role="status" hidden></p>
+        <div class="history-delete-actions">
+          <button id="history-delete-cancel" type="button" class="secondary" autofocus>取消</button>
+          <button id="history-delete-submit" type="submit" class="primary danger-button">确认删除</button>
+        </div>
+      </form>
+    </dialog>
+
     <div id="toast" class="toast" aria-live="polite" hidden></div>
 
     <template id="question-template">
@@ -488,6 +530,7 @@
           <strong>发现字库暂不支持的字符：</strong>
           <span class="font-warn-chars"></span>
         </div>
+        <button type="button" class="text-button save-library-draft" hidden>存入题库</button>
       </fieldset>
     </template>
 

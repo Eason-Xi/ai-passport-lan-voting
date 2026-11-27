@@ -2,7 +2,7 @@
 
 # LAN voting
 
-One computer hosts a poll for up to ten registered AI Passport voters. Each question has two to six options. A device locks its first confirmed choice for that question. The host sees live statistics and publishes the final result to all voters. The session runs on the local network.
+One computer hosts a poll for ten registered AI Passport voters by default. The host can set a limit from 1 to 200. Each question has two to six options. A device locks its first confirmed choice for that question. The host sees live statistics and publishes the final result to all voters. The session runs on the local network.
 
 This repository contains the 0.4.0 voter firmware and host console. The voter uses an ESP32-C3, 8 MB of flash and three buttons. Board support comes from [AI Passport](https://github.com/Eason-Xi/ai-passport) under its original MIT license. The [project brief](docs/LAN_Voting_PRD_v0.1_重建版.md) is available in Simplified Chinese.
 
@@ -17,6 +17,16 @@ This repository contains the 0.4.0 voter firmware and host console. The voter us
 The computer can use Ethernet or Wi-Fi. Automatic discovery uses UDP 48765 on the same IPv4 subnet. Voting uses the host TCP port (8765 by default). Discovery carries a random challenge, a public host identifier and a port. A paired voter can find the same host after its IP address or port changes. Hosts using different databases have different identities. Hold OK and confirm reconfiguration to change hosts.
 
 If broadcasts are filtered or the host runs older software, expand manual host settings and enter a private IPv4 address such as `192.168.1.20` or `192.168.1.20:9876`. The console lists the full addresses under participating devices. Use a network that allows clients to communicate. Rejoin the device hotspot if the phone disconnects during a Wi-Fi channel change.
+
+## Question library
+
+Use the question library beside the voting editor to create and edit saved questions. You can also save a completed question draft to the library. The library is stored in the room's SQLite database, so the desktop window and web console share it when they open the same room.
+
+Select a saved question to load it into the current voting form. You can adjust the title, options, mode and quiz answer before starting the poll or appending the question. An issued poll keeps the version it was sent with.
+
+## Set the device limit
+
+Enter a device limit in the participating devices section of the desktop or web console and save it. The host saves the setting in the room's database and applies it during an ongoing poll. Raising the limit immediately makes room for new registrations. Offline devices count toward the limit. Before reducing it below the number already registered, remove enough offline devices from the list. The console and projection view both display the new limit.
 
 ## Voting modes
 
@@ -75,11 +85,15 @@ python3 -m venv .venv
 
 On Windows, create the environment with `py -3.12 -m venv .venv` and use `.venv\Scripts\python.exe` for the following commands. Use `--port` for another port or `--data` for a different event database. Administrative access is local to the host computer.
 
+The desktop window opens the existing session when a Gongxuan host is already running on the default port. You can keep using that session's enrollment code and history. If you run several sessions, use the manual host settings on the voter setup page and enter the LAN address, port and enrollment code shown by the intended host.
+
 ## Counting and recovery
 
 Starting a poll immediately pushes the question and choices to connected voters. The console shows how many connections it sent to. Devices that join or reconnect during voting receive their current question automatically.
 
 Manual close, deadline expiry and direct publication each save a final report in the same database transaction that ends voting. Open the saved report from the live panel or the history list. Each session includes distinct participants, total votes and per-question option counts and percentages, with a CSV download. A batch gets one report covering all its questions, including those with zero votes. Upgrading restores reports from existing ballots and leaves unknown legacy end times blank. Viewing or exporting a report is available to the host before publication.
+
+Expand a session in the voting history and confirm deletion to remove its saved report. Viewing, reusing and downloading the report from history end with that deletion. The host can still publish the current poll from the live tally.
 
 | Situation | Behavior |
 | --- | --- |

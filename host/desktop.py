@@ -12,9 +12,9 @@ import socket
 import subprocess
 import sys
 import threading
-import urllib.error
-import urllib.request
 import webbrowser
+from contextlib import closing
+from http.client import HTTPConnection, HTTPException
 from pathlib import Path
 
 from aiohttp import web
@@ -48,16 +48,21 @@ def default_data_path() -> Path:
     return base / "votes.sqlite3"
 
 
-def probe_existing_host(port: int) -> bool:
-    url = f"http://127.0.0.1:{port}/api/state"
-    try:
-        with urllib.request.urlopen(url, timeout=0.6) as resp:
-            if resp.status != 200:
-                return False
-            data = json.loads(resp.read().decode("utf-8"))
-            return isinstance(data, dict) and "join_code" in data and "host_id" in data
-    except (OSError, ValueError, urllib.error.URLError):
-        return False
+def probe_existing_host(port: int) -> str | None:
+    # 两个回环地址可能由不同进程监听。窗口必须沿用找到共选服务的那个地址。
+    for host, authority in (("127.0.0.1", "127.0.0.1"), ("::1", "[::1]")):
+        try:
+            with closing(HTTPConnection(host, port, timeout=0.6)) as connection:
+                connection.request("GET", "/api/state")
+                response = connection.getresponse()
+                if response.status != 200:
+                    continue
+                data = json.loads(response.read())
+                if isinstance(data, dict) and "join_code" in data and "host_id" in data:
+                    return f"http://{authority}:{port}/"
+        except (OSError, ValueError, HTTPException):
+            continue
+    return None
 
 
 def is_port_free(port: int) -> bool:
@@ -71,21 +76,22 @@ def is_port_free(port: int) -> bool:
         sock.close()
 
 
-def choose_port(preferred: int, strict: bool = False) -> tuple[int, bool]:
-    """返回 (port, reuse_existing)。若已有共选主持台运行在目标端口，直接复用。"""
+def choose_port(preferred: int, strict: bool = False) -> tuple[int, str | None]:
+    """返回监听端口和已运行的主持台地址。已运行时直接在桌面窗口打开该地址。"""
+    existing_url = probe_existing_host(preferred)
+    if existing_url is not None:
+        return preferred, existing_url
     if is_port_free(preferred):
-        return preferred, False
-    if probe_existing_host(preferred):
-        return preferred, True
+        return preferred, None
     if strict:
         raise RuntimeError(f"端口 {preferred} 已被其他程序占用，请使用 --port 指定其他端口。")
     for candidate in range(preferred + 1, min(preferred + 50, 65535)):
         if is_port_free(candidate):
-            return candidate, False
+            return candidate, None
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.bind(("0.0.0.0", 0))
-        return sock.getsockname()[1], False
+        return sock.getsockname()[1], None
     finally:
         sock.close()
 
@@ -233,11 +239,11 @@ class DesktopBridge:
 def launch_desktop(port: int, data_path: Path, strict_port: bool = False) -> int:
     import webview
 
-    chosen_port, reuse_existing = choose_port(port, strict=strict_port)
-    url = f"http://127.0.0.1:{chosen_port}/"
+    chosen_port, existing_url = choose_port(port, strict=strict_port)
+    url = existing_url or f"http://127.0.0.1:{chosen_port}/"
     server_thread: HostServerThread | None = None
 
-    if not reuse_existing:
+    if existing_url is None:
         data_path.parent.mkdir(parents=True, exist_ok=True)
         server_thread = HostServerThread(data_path, chosen_port)
         server_thread.start()

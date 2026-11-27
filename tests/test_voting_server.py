@@ -10,10 +10,10 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from aiohttp import ClientSession, WSMsgType, web
+from aiohttp import ClientSession, TCPConnector, WSMsgType, web
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "host"))
-from server import MAX_BATCH_POLLS, MAX_DEADLINE_MS, Store, VotingService, clock_ms
+from server import DEFAULT_DEVICE_LIMIT, MAX_BATCH_POLLS, MAX_DEADLINE_MS, MAX_DEVICE_LIMIT, Store, VotingService, clock_ms
 
 
 class StoreTest(unittest.TestCase):
@@ -25,6 +25,53 @@ class StoreTest(unittest.TestCase):
     def tearDown(self):
         self.store.db.close()
         self.tmp.cleanup()
+
+    def test_device_limit_persists_and_protects_registrations(self):
+        self.assertEqual(self.store.device_limit(), DEFAULT_DEVICE_LIMIT)
+        first, second, third = ("aabbcc000001", "aabbcc000002", "aabbcc000003")
+        self.store.register(first)
+        self.store.set_device_limit(1)
+        with self.assertRaisesRegex(ValueError, "设备已满"):
+            self.store.register(second)
+        self.store.register(first)
+        self.store.set_device_limit(2)
+        self.store.register(second)
+        for invalid in (None, True, "2", 1.5, 0, MAX_DEVICE_LIMIT + 1):
+            with self.assertRaisesRegex(ValueError, "整数"):
+                self.store.set_device_limit(invalid)
+        with self.assertRaisesRegex(ValueError, "2 台设备登记"):
+            self.store.set_device_limit(1)
+        code = self.store.join_code
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual((self.store.device_limit(), self.store.join_code), (2, code))
+        self.store.register(second)
+        with self.assertRaisesRegex(ValueError, "设备已满"):
+            self.store.register(third)
+
+    def test_library_revisions_and_saved_vote_content(self):
+        question = dict(id="a000000000000020", title="哪一项是水果", options=["苹果", "白菜"], mode="quiz", correct_choice=0)
+        self.assertEqual(self.store.library_questions(), [])
+        self.store.save_library_question(question)
+        self.store.save_library_question(question)
+        [original] = self.store.library_questions()
+        self.assertEqual(original["revision"], 1)
+        self.store.create(original)
+        poll = self.store.current()["id"]
+        self.store.vote("a", poll, 0)
+        self.store.transition(poll, "published")
+        edited = {**original, "title": "哪一项是蔬菜", "correct_choice": 1}
+        self.store.save_library_question(edited)
+        self.store.save_library_question(edited)
+        with self.assertRaisesRegex(ValueError, "新版本"):
+            self.store.save_library_question({**original, "title": "其他问题"})
+        with self.assertRaisesRegex(ValueError, "有效"):
+            self.store.save_library_question({**edited, "correct_choice": 2})
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.library_questions(), [{**edited, "revision": 2}])
+        [result] = self.store.report(poll)["questions"]
+        self.assertEqual((result["title"], result["correct_choice"], result["counts"]), (original["title"], 0, [1, 0]))
 
     def test_persistence_and_first_vote(self):
         self.store.register("aabbcc000001")
@@ -145,6 +192,29 @@ class StoreTest(unittest.TestCase):
             self.assertIsNone(older["next_before"])
             self.assertIsNone(recent["reports"][0]["ended_at_ms"])
             self.assertIsNone(self.store.report(self.store.current()["id"]))
+
+    def test_deleted_reports_stay_deleted_after_restart(self):
+        self.store.create(dict(title="保留记录", options=["是", "否"]))
+        kept = self.store.current()["id"]
+        self.store.transition(kept, "published")
+        self.store.create(dict(title="删除归档测试", options=["甲", "乙"]))
+        current = self.store.current()["id"]
+        self.store.vote("a", current, 1)
+        with self.assertRaisesRegex(ValueError, "找不到"):
+            self.store.delete_report(current)
+        self.store.transition(current, "closed")
+        self.store.delete_report(current)
+        self.store.delete_report(current)
+        self.assertIsNone(self.store.report(current))
+        self.assertEqual(self.store.current()["phase"], "closed")
+        self.store.transition(current, "published")
+        self.assertEqual(self.store.snapshot("a")["poll"]["counts"], [0, 1])
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertIsNone(self.store.report(current))
+        self.assertEqual([report["id"] for report in self.store.history()["reports"]], [kept])
+        self.assertEqual(self.store.current()["id"], current)
+        self.assertEqual(self.store.snapshot("a")["poll"]["my_choice"], 1)
 
     @patch("server.clock_ms", return_value=1_800_000_000_000)
     def test_append_limit_retry_deadline_and_closed_history(self, clock):
@@ -326,7 +396,7 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
         self.path = Path(self.tmp.name) / "votes.sqlite3"
         self.service = VotingService(self.path, discovery_port=0)
         await self.start_server()
-        self.session = ClientSession()
+        self.session = ClientSession(connector=TCPConnector(limit=0))
         self.sockets = []
 
     async def start_server(self):
@@ -546,6 +616,11 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
         await expect(fast,a,0)
         await expect(slow,a,0)
         await cast(fast,a,1)
+        async def wait_for_commit():
+            while self.service.store.snapshot("aabbcc000000")["poll"]["id"] != b:
+                await asyncio.sleep(.01)
+        await asyncio.wait_for(wait_for_commit(), timeout=3)
+        await slow.send_json(dict(v=1, type="sync"))
         await expect(slow,a,0)
         # 快设备未读取确认便断开；记录已落库，重连时直接拿到第二题。
         await fast.close()
@@ -603,6 +678,47 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
             await self.receive_until(ws,lambda d:d["poll"]["batch"]["answered"] == 3)
         await asyncio.gather(*(answer(i,ws) for i,ws in enumerate(clients)))
         self.assertEqual([q["counts"] for q in self.service.store.snapshot()["batch"]["polls"]],[[5,5]]*3)
+
+    async def test_capacity_expands_during_voting_and_counts_200_voters(self):
+        clients = [((await self.connect(i))[0], None) for i in range(DEFAULT_DEVICE_LIMIT)]
+        questions = [dict(title=f"压力测试第{i + 1}题", options=["是","否"]) for i in range(3)]
+        started = await self.action("create_batch", {"questions":questions})
+        self.assertEqual(started["pushed_to"], DEFAULT_DEVICE_LIMIT)
+        _, full = await self.connect(DEFAULT_DEVICE_LIMIT)
+        self.assertIn("设备已满", full["message"])
+        await self.action("device_limit", {"limit":MAX_DEVICE_LIMIT})
+        clients.extend(await asyncio.gather(*(
+            self.connect(i) for i in range(DEFAULT_DEVICE_LIMIT, MAX_DEVICE_LIMIT))))
+        _, full = await self.connect(MAX_DEVICE_LIMIT)
+        self.assertIn(f"{MAX_DEVICE_LIMIT} 台", full["message"])
+        async with self.session.get(self.base + "/api/state") as response:
+            live = await response.json()
+        self.assertEqual(live["max_devices"], MAX_DEVICE_LIMIT)
+        self.assertEqual(sum(d["online"] for d in live["devices"]), MAX_DEVICE_LIMIT)
+        polls = live["batch"]["polls"]
+
+        async def complete(index, ws, packet):
+            if packet is None:
+                packet = await ws.receive_json(timeout=10)
+            for question in polls:
+                self.assertEqual(packet["poll"]["id"], question["id"])
+                await ws.send_json(dict(v=1, type="vote", poll_id=question["id"], choice=index % 2))
+                packet = await ws.receive_json(timeout=10)
+            self.assertEqual(packet["poll"]["batch"]["answered"], len(polls))
+
+        await asyncio.gather(*(complete(i, ws, packet) for i, (ws, packet) in enumerate(clients)))
+        poll_id = polls[0]["id"]
+        await self.action("publish", {"poll_id":poll_id})
+        results = await asyncio.gather(*(ws.receive_json(timeout=10) for ws, _ in clients))
+        for packet in results:
+            self.assertEqual(packet["poll"]["total"], MAX_DEVICE_LIMIT)
+            self.assertEqual(packet["poll"]["counts"], [MAX_DEVICE_LIMIT // 2] * 2)
+        report = self.service.store.report(poll_id)
+        self.assertEqual((report["participants"], report["total_votes"]), (MAX_DEVICE_LIMIT, MAX_DEVICE_LIMIT * len(polls)))
+        self.assertEqual([q["total"] for q in report["questions"]], [MAX_DEVICE_LIMIT] * len(polls))
+        out = Path(__file__).resolve().parents[1] / "build" / "vote-capacity-wire.jsonl"
+        out.parent.mkdir(exist_ok=True)
+        out.write_text(json.dumps(results[0], ensure_ascii=False) + "\n")
 
     async def test_idle_expiry_push_and_offline_voter(self):
         ws, _ = await self.connect(0)
@@ -717,6 +833,27 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200)
             self.assertIn("共选", await response.text())
 
+    async def test_question_library_is_local_and_can_supply_append_drafts(self):
+        ws, _ = await self.connect(0)
+        saved = dict(id="a000000000000021", title="意见表决", mode="approval")
+        async with self.session.get(self.base + "/api/question_library", headers={"Host": "untrusted.example"}) as response:
+            self.assertEqual(response.status, 403)
+        async with self.session.post(self.base + "/api/library_save", json=saved) as response:
+            self.assertEqual(response.status, 403)
+        await self.action("library_save", saved)
+        self.assertIsNone(self.service.store.current())
+        async with self.session.get(self.base + "/api/question_library") as response:
+            [question] = (await response.json())["questions"]
+        self.assertEqual(question["options"], ["赞成", "反对", "弃权"])
+        await self.action("create", dict(title="现场问题", options=["甲", "乙"]))
+        initial = (await ws.receive_json(timeout=3))["poll"]
+        await self.action("append_question", {**question, "batch_id": initial["id"], "question_id": "a000000000000022"})
+        await self.action("library_save", {**question, "title": "另一次表决"})
+        await ws.send_json(dict(v=1, type="vote", poll_id=initial["id"], choice=0))
+        next_question = await self.receive_until(ws, lambda d: d["poll"]["id"] == "a000000000000022")
+        self.assertEqual(next_question["poll"]["title"], saved["title"])
+        self.assertNotIn("revision", next_question["poll"])
+
     async def test_history_and_device_alias(self):
         ws0, _ = await self.connect(0)
         await self.action("create", dict(title="第一题", options=["赞成", "反对"]))
@@ -745,6 +882,23 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
             reports = (await response.json())["reports"]
             self.assertEqual([item["title"] for item in reports], ["第一题"])
             self.assertEqual(reports[0]["total_votes"], 1)
+
+    async def test_local_history_delete_removes_detail_and_download(self):
+        await self.action("create", dict(title="删除测试", options=["是", "否"]))
+        archived = self.service.store.current()["id"]
+        await self.action("publish", {"poll_id": archived})
+        await self.action("create", dict(title="正在收票", options=["甲", "乙"]))
+        current = self.service.store.current()["id"]
+        target = {"batch_id": archived}
+        async with self.session.post(self.base + "/api/history_delete", json=target) as response:
+            self.assertEqual(response.status, 403)
+        await self.action("history_delete", target)
+        async with self.session.get(self.base + "/api/history") as response:
+            self.assertEqual((await response.json())["reports"], [])
+        for suffix in ("", "/csv"):
+            async with self.session.get(self.base + f"/api/history/{archived}{suffix}") as response:
+                self.assertEqual(response.status, 404)
+        self.assertEqual((self.service.store.current()["id"], self.service.store.current()["phase"]), (current, "open"))
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)

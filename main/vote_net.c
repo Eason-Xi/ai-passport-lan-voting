@@ -629,7 +629,7 @@ static void setup_tick(vote_view_t *view, int64_t now, EventBits_t bits)
             outcome = save_candidate() == ESP_OK ? SETUP_SAVED : SETUP_STORE_FAILED;
         } else if (s_error[0]) {
             if (strstr(s_error, "入场码")) outcome = SETUP_BAD_CODE;
-            else if (strstr(s_error, "10 台")) outcome = SETUP_FULL;
+            else if (strstr(s_error, "设备已满") || strstr(s_error, "10 台")) outcome = SETUP_FULL;
             else outcome = SETUP_DENIED;
         } else if (!(bits & WIFI_READY) || now - s_test_start >= 12000) {
             outcome = SETUP_UNREACHABLE;
