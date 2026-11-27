@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "deploy:custom": "wrangler deploy -c wrangler.local.jsonc",
     "deploy:dry-run": "wrangler deploy --dry-run",
     "types": "wrangler types",
     "typecheck": "tsc --noEmit",

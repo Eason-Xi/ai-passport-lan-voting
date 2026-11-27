@@ -1,11 +1,18 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  // 仅使用 Cloudflare 默认提供的 *.workers.dev 免费地址，不绑定任何自定义域名
+  // 默认使用 Cloudflare 免费提供的 *.workers.dev 地址；
+  // 如需绑定自己的域名（国内网络直连更稳），可取消下方 routes 注释或复制为 wrangler.local.jsonc 使用 `npm run deploy:custom`。
   "name": "gongxuan-vote",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-23",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  // "routes": [
+  //   {
+  //     "pattern": "vote.example.com",
+  //     "custom_domain": true
+  //   }
+  // ],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
