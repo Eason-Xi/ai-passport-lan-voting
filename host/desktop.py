@@ -256,7 +256,7 @@ def launch_desktop(port: int, data_path: Path, strict_port: bool = False) -> int
         width=1280,
         height=840,
         min_size=(960, 640),
-        background_color="#eff3ee",
+        background_color="#f5f5f7",
         text_select=True,
     )
     bridge.bind_window(window)

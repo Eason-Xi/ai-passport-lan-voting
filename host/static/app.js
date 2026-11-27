@@ -342,45 +342,45 @@ async function exportPollImage(poll) {
   const ctx = canvas.getContext("2d");
   ctx.scale(scale, scale);
 
-  ctx.fillStyle = "#f4f7f2";
+  ctx.fillStyle = "#f5f5f7";
   ctx.fillRect(0, 0, width, height);
 
   const headerGrad = ctx.createLinearGradient(0, 0, width, headerH);
-  headerGrad.addColorStop(0, "#155f50");
-  headerGrad.addColorStop(1, "#0d3f35");
+  headerGrad.addColorStop(0, "#1d1d1f");
+  headerGrad.addColorStop(1, "#141416");
   ctx.fillStyle = headerGrad;
   ctx.fillRect(0, 0, width, headerH);
 
   drawRoundedRect(ctx, padX, 42, 54, 54, 14);
-  ctx.fillStyle = "rgba(255,255,255,0.16)";
+  ctx.fillStyle = "rgba(255,255,255,0.14)";
   ctx.fill();
   ctx.fillStyle = "#ffffff";
-  ctx.font = `700 30px ${fontBase}`;
+  ctx.font = `600 28px ${fontBase}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText("共", padX + 27, 70);
 
   ctx.textAlign = "left";
-  ctx.font = `700 24px ${fontBase}`;
+  ctx.font = `600 24px ${fontBase}`;
   ctx.fillText("共选 · 局域网投票结果", padX + 72, 58);
-  ctx.fillStyle = "rgba(232,248,240,0.78)";
+  ctx.fillStyle = "rgba(245,245,247,0.68)";
   ctx.font = `400 15px ${fontBase}`;
   ctx.fillText(`导出时间：${beijingTime.format(Date.now())}（北京时间）`, padX + 72, 86);
 
   const total = poll.total || 0;
   ctx.textAlign = "right";
   ctx.fillStyle = "#ffffff";
-  ctx.font = `700 30px ${fontBase}`;
+  ctx.font = `600 30px ${fontBase}`;
   ctx.fillText(`${total} 票`, width - padX, 60);
-  ctx.fillStyle = "rgba(232,248,240,0.78)";
+  ctx.fillStyle = "rgba(245,245,247,0.68)";
   ctx.font = `400 14px ${fontBase}`;
   ctx.fillText(PHASES[poll.phase] || "历史归档", width - padX, 88);
 
   let y = headerH + 40;
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
-  ctx.fillStyle = "#143530";
-  ctx.font = `700 36px ${fontBase}`;
+  ctx.fillStyle = "#1d1d1f";
+  ctx.font = `600 36px ${fontBase}`;
   for (const line of titleLines) {
     ctx.fillText(line, padX, y);
     y += 50;
@@ -388,10 +388,10 @@ async function exportPollImage(poll) {
 
   if (summaryText) {
     y += 6;
-    drawRoundedRect(ctx, padX, y, contentW, 42, 10);
-    ctx.fillStyle = "#e6f3ec";
+    drawRoundedRect(ctx, padX, y, contentW, 42, 12);
+    ctx.fillStyle = "rgba(0,113,227,0.09)";
     ctx.fill();
-    ctx.fillStyle = "#134d3e";
+    ctx.fillStyle = "#005bb5";
     ctx.font = `600 18px ${fontBase}`;
     ctx.textBaseline = "middle";
     ctx.fillText(summaryText, padX + 16, y + 21);
@@ -406,31 +406,36 @@ async function exportPollImage(poll) {
     const pct = total ? (cnt * 100) / total : 0;
     const isCorrect = poll.mode === "quiz" && poll.correct_choice === i;
     const leading = isCorrect || (total > 0 && cnt === maxVotes);
+    const accentColor = isCorrect ? "#34c759" : "#0071e3";
 
     drawRoundedRect(ctx, padX, y, contentW, rowH, 16);
-    ctx.fillStyle = leading ? "#edf7f2" : "#ffffff";
+    ctx.fillStyle = "#ffffff";
     ctx.fill();
-    ctx.strokeStyle = leading ? "#9ecbb6" : "rgba(20,53,48,0.1)";
-    ctx.lineWidth = leading ? 2 : 1;
+    ctx.strokeStyle = isCorrect
+      ? "rgba(52,199,89,0.45)"
+      : leading
+        ? "rgba(0,113,227,0.35)"
+        : "rgba(0,0,0,0.07)";
+    ctx.lineWidth = leading ? 1.5 : 1;
     ctx.stroke();
 
-    drawRoundedRect(ctx, padX + 20, y + 18, 32, 32, 8);
-    ctx.fillStyle = leading ? "#145e4f" : "#e5eee7";
+    drawRoundedRect(ctx, padX + 20, y + 18, 32, 32, 16);
+    ctx.fillStyle = leading ? accentColor : "#ededf0";
     ctx.fill();
-    ctx.fillStyle = leading ? "#ffffff" : "#3a5a52";
-    ctx.font = `700 17px ${fontBase}`;
+    ctx.fillStyle = leading ? "#ffffff" : "#6e6e73";
+    ctx.font = `600 16px ${fontBase}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(String.fromCharCode(65 + i), padX + 36, y + 35);
 
     ctx.textAlign = "left";
-    ctx.fillStyle = "#143530";
+    ctx.fillStyle = "#1d1d1f";
     ctx.font = `600 21px ${fontBase}`;
     ctx.fillText(opt + (isCorrect ? "（正确答案）" : ""), padX + 64, y + 35);
 
     ctx.textAlign = "right";
-    ctx.fillStyle = leading ? "#145e4f" : "#3a5a52";
-    ctx.font = `700 20px ${fontBase}`;
+    ctx.fillStyle = isCorrect ? "#1b7f37" : leading ? "#0071e3" : "#6e6e73";
+    ctx.font = `600 20px ${fontBase}`;
     ctx.fillText(
       `${!isCorrect && total > 0 && cnt === maxVotes ? "★ " : ""}${cnt} 票 · ${pct.toFixed(1)}%`,
       padX + contentW - 22,
@@ -438,14 +443,14 @@ async function exportPollImage(poll) {
     );
 
     const barX = padX + 20;
-    const barY = y + 62;
+    const barY = y + 63;
     const barW = contentW - 40;
-    drawRoundedRect(ctx, barX, barY, barW, 12, 6);
-    ctx.fillStyle = "#e2ebe4";
+    drawRoundedRect(ctx, barX, barY, barW, 10, 5);
+    ctx.fillStyle = "#ebebf0";
     ctx.fill();
     if (pct > 0) {
-      drawRoundedRect(ctx, barX, barY, Math.max(12, (barW * pct) / 100), 12, 6);
-      ctx.fillStyle = leading ? "#156353" : "#569c7f";
+      drawRoundedRect(ctx, barX, barY, Math.max(10, (barW * pct) / 100), 10, 5);
+      ctx.fillStyle = leading ? accentColor : "#8e8e93";
       ctx.fill();
     }
     y += rowH + 14;
@@ -453,7 +458,7 @@ async function exportPollImage(poll) {
 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillStyle = "#778a7f";
+  ctx.fillStyle = "#86868b";
   ctx.font = `400 14px ${fontBase}`;
   ctx.fillText("由共选局域网投票主持台本地生成 · 数据仅保存在现场电脑", width / 2, height - 38);
 
@@ -1162,6 +1167,7 @@ function renderStage(p, batch, onlineCount) {
 
       const card = document.createElement("div");
       card.className = `stage-result${leading ? " leading" : ""}`;
+      if (isCorrect) card.dataset.correct = "";
 
       const top = document.createElement("div");
       top.className = "stage-result-top";

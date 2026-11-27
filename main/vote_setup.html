@@ -6,23 +6,25 @@
   <title>共选 · 投票器入场</title>
   <style>
     * { box-sizing: border-box; }
-    body { margin: 0; background: #f4f5ef; color: #193c39; font: 16px/1.5 system-ui, sans-serif; }
-    main { width: min(100%, 440px); margin: 0 auto; padding: 28px 20px 40px; }
-    h1 { font-size: 29px; margin: 0 0 6px; }
-    p { margin: 0 0 20px; }
-    label { display: block; font-weight: 650; }
-    form, #rooms { padding: 20px; border-radius: 16px; background: white; }
+    body { margin: 0; background: #f2f2f7; color: #1d1d1f; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; -webkit-font-smoothing: antialiased; }
+    main { width: min(100%, 440px); margin: 0 auto; padding: 32px 20px 44px; }
+    h1 { font-size: 28px; font-weight: 600; letter-spacing: -.02em; margin: 0 0 6px; }
+    p { margin: 0 0 22px; color: #6e6e73; font-size: 14px; }
+    label { display: block; font-size: 13px; font-weight: 500; color: #1d1d1f; }
+    form, #rooms { padding: 22px; border-radius: 20px; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.04), 0 0 0 .5px rgba(0,0,0,.06); }
     input, select, button { font: inherit; }
-    input, select { display: block; width: 100%; border: 1px solid #9baea3; border-radius: 8px; padding: 10px; margin: 5px 0 16px; }
+    input, select { display: block; width: 100%; border: 1px solid rgba(0,0,0,.12); background-color: #f5f5f7; color: #1d1d1f; border-radius: 12px; padding: 11px 13px; margin: 6px 0 16px; outline: none; }
+    select { appearance: none; -webkit-appearance: none; padding-right: 34px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none'%3E%3Cpath d='M1.5 1.75L6 6.25L10.5 1.75' stroke='%236e6e73' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 13px center; }
+    input:focus, select:focus { background-color: #fff; border-color: #0071e3; box-shadow: 0 0 0 3.5px rgba(0,113,227,.2); }
     button, summary { cursor: pointer; }
-    button { border: 0; background: #176756; color: white; padding: 11px 16px; border-radius: 8px; }
-    #submit, #rooms button { width: 100%; margin-top: 12px; }
-    #refresh { color: #176756; background: transparent; padding: 0; font-size: 14px; }
+    button { border: 0; background: #0071e3; color: #fff; padding: 12px 18px; border-radius: 980px; font-weight: 500; }
+    #submit, #rooms button { width: 100%; margin-top: 10px; }
+    #refresh { color: #0071e3; background: transparent; padding: 0; font-size: 13px; border-radius: 0; }
     .row { display: flex; align-items: baseline; justify-content: space-between; }
-    summary, small { color: #4d655c; }
-    summary { padding: 8px 0; }
-    #status { margin: 16px 0; padding: 12px 14px; border-radius: 8px; background: #e0eadc; }
-    button:disabled { opacity: .55; cursor: wait; }
+    summary, small { color: #6e6e73; font-size: 13px; }
+    summary { padding: 8px 0; color: #0071e3; font-weight: 500; }
+    #status { margin: 16px 0; padding: 13px 16px; border-radius: 14px; background: rgba(0,113,227,.09); color: #005bb5; font-size: 13.5px; }
+    button:disabled { opacity: .45; cursor: wait; }
     [hidden] { display: none !important; }
   </style>
 </head>
