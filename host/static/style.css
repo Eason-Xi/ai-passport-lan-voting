@@ -1165,6 +1165,12 @@ input::placeholder {
   max-width: 100%;
 }
 
+.deadline-duration {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 /* ==================== 按钮系统（Apple Pill Buttons） ==================== */
 .primary,
 .secondary {

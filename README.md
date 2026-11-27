@@ -91,7 +91,9 @@ Devices that finished the original questions immediately receive the new one. Ot
 
 ## Timed voting
 
-Durations run from the time the host starts the poll. A specific date and time uses Beijing time (UTC+8) regardless of the browser's time zone. While voting is open, expand the deadline editor in the live results panel to reschedule or return to manual closing. A replacement duration starts when the host saves the change. The host may also close early.
+Choose a preset or enter a custom duration in minutes and seconds before issuing the poll. The countdown starts when the host starts voting. A specific date and time uses Beijing time (UTC+8) regardless of the browser's time zone.
+
+To add a deadline to an open poll using manual closing, select “设置截止时间” (Set deadline) in the live tally and save a duration or a date and time. If a deadline is already set, “调整截止时间” (Adjust deadline) lets you reschedule or return to manual closing. A duration set mid-poll starts when you save it and applies to every question in the round. The host may also close early.
 
 The console displays the scheduled time and a countdown. Version 0.3 voters show the remaining time in their upper left corner, using the host snapshot and the device's monotonic clock. The host stops accepting new votes at the deadline and notifies connected voters even when the console page is closed. Closed questions stay closed. Publishing results remains a separate host action.
 

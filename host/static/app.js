@@ -139,12 +139,18 @@ function deadlineFields(id) {
   const box = $(id);
   box.append($("deadline-template").content.cloneNode(true));
   const mode = box.querySelector("select");
-  const at = box.querySelector("input");
+  const at = box.querySelector('[name="at"]');
+  const durationFields = box.querySelector(".deadline-duration");
+  const minutes = durationFields.querySelector('[name="minutes"]');
+  const seconds = durationFields.querySelector('[name="seconds"]');
 
   function selectMode() {
     at.disabled = mode.value !== "custom";
     at.required = !at.disabled;
     at.parentElement.hidden = at.disabled;
+    durationFields.hidden = mode.value !== "duration";
+    minutes.disabled = durationFields.hidden;
+    seconds.disabled = durationFields.hidden;
     if (!at.disabled && !at.value && state?.server_now_ms) {
       at.value = beijingInput(hostNow() + 300000);
     }
@@ -157,11 +163,21 @@ function deadlineFields(id) {
     reset(deadline) {
       mode.value = deadline ? "custom" : "manual";
       at.value = deadline ? beijingInput(deadline) : "";
+      minutes.value = "";
+      seconds.value = "";
       selectMode();
     },
     value() {
       if (mode.value === "manual") return { deadline_at_ms: null };
       if (!state?.server_now_ms) throw Error("请重启新版主持服务后设置定时截止。");
+      if (mode.value === "duration") {
+        const total = (minutes.value ? minutes.valueAsNumber : 0) * 60
+          + (seconds.value ? seconds.valueAsNumber : 0);
+        if (!Number.isSafeInteger(total) || total <= 0) {
+          throw Error("请输入大于 0 秒的有效时长。");
+        }
+        return { duration_seconds: total };
+      }
       if (mode.value !== "custom") return { duration_seconds: Number(mode.value) };
       const deadline = Date.parse(at.value + "+08:00");
       if (!Number.isFinite(deadline) || deadline <= hostNow()) {
@@ -230,6 +246,7 @@ function renderDeadline(p) {
   }
 
   const editor = $("edit-deadline");
+  editor.querySelector("summary").textContent = deadline ? "调整截止时间" : "设置截止时间";
   editor.hidden = p.phase !== "open" || !state.server_now_ms;
   if (editor.hidden || (editingPoll && editingPoll !== p.id)) editor.open = false;
   // 折叠时准备当前值，展开后保留主持人的输入，轮询不会覆盖正在编辑的选择。
