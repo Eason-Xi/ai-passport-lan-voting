@@ -1,5 +1,7 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
+const pageParams = new URLSearchParams(location.search);
+const stageView = pageParams.get("view") === "stage";
 
 let state = null;
 let busy = false;
@@ -10,7 +12,6 @@ let editingPoll = null;
 let editingAliasDevice = null;
 let deviceLimitDirty = false;
 let renderedDevices = null;
-let stageOpen = false;
 let stageLight = false;
 let stageMaskCounts = true;
 let lastPollId = null;
@@ -253,16 +254,6 @@ function renderDeadline(p) {
   if (!editor.open) {
     editingPoll = p.id;
     activeDeadline.reset(deadline);
-  }
-
-  const stageCountdown = $("stage-countdown");
-  if (deadline && p.phase === "open") {
-    stageCountdown.hidden = false;
-    stageCountdown.classList.toggle("urgent", urgent);
-    $("stage-time-left").textContent = title;
-    $("stage-deadline-at").textContent = `北京时间 ${beijingTime.format(deadline)} 截止`;
-  } else {
-    stageCountdown.hidden = true;
   }
 }
 
@@ -1089,6 +1080,13 @@ function activeLivePoll() {
 }
 
 function updateButtons() {
+  const p = state?.poll;
+  if (stageView) {
+    $("stage-close").disabled = busy || p?.phase !== "open";
+    $("stage-publish").disabled = busy || !p || p.phase === "published";
+    $("stage-export").disabled = !p;
+    return;
+  }
   updateEditor();
   $("history-delete-submit").disabled = busy || !state?.supports_history_delete;
   $("history-delete-cancel").disabled = busy;
@@ -1108,7 +1106,6 @@ function updateButtons() {
   document.querySelectorAll(".question-mode").forEach((control) => {
     control.hidden = !state?.supports_modes;
   });
-  const p = state?.poll;
   const size = $("questions").children.length;
   $("add-question").disabled = !state || busy || size >= (state.max_batch_polls || 1);
   $("add-question").textContent =
@@ -1123,9 +1120,6 @@ function updateButtons() {
   $("publish").disabled = busy || !p || p.phase === "published";
   $("save-deadline").disabled = busy || p?.phase !== "open";
   $("show-result").disabled = busy || !state?.batch || p?.phase !== "published";
-  $("stage-close").disabled = $("close").disabled;
-  $("stage-publish").disabled = $("publish").disabled;
-  $("stage-export").disabled = !p;
   newDeadline.mode.disabled = !state || !state.server_now_ms;
   $("deadline-upgrade").hidden = !state || !!state.server_now_ms;
   $("form-note").textContent =
@@ -1135,6 +1129,17 @@ function updateButtons() {
 }
 
 /* ==================== 渲染大屏、设备与主界面 ==================== */
+function renderStageDeadline(p) {
+  const deadline = p?.deadline_at_ms;
+  const countdown = $("stage-countdown");
+  countdown.hidden = !deadline || p.phase !== "open";
+  if (countdown.hidden) return;
+  const remaining = formatRemaining(deadline - hostNow());
+  countdown.classList.toggle("urgent", remaining.seconds > 0 && remaining.seconds <= 10);
+  $("stage-time-left").textContent = remaining.text;
+  $("stage-deadline-at").textContent = `北京时间 ${beijingTime.format(deadline)} 截止`;
+}
+
 function renderStage(p, batch, onlineCount) {
   $("stage-code").textContent = state.join_code;
   $("stage-online").textContent = String(onlineCount);
@@ -1335,16 +1340,11 @@ function renderDevices(batch) {
 }
 
 function render() {
-  if (state.latest_report !== historyHead || state.history_count !== historyCount) {
-    historyHead = state.latest_report;
-    historyCount = state.history_count;
-    loadHistory();
-  }
   const batch = state.batch?.polls;
   const picker = $("live-question");
   $("batch-picker").hidden = !batch;
   if (batch && (picker.dataset.batch !== state.batch.id || picker.options.length !== batch.length)) {
-    const selected = picker.value;
+    const selected = picker.value || (stageView ? pageParams.get("question") : null);
     picker.replaceChildren(...batch.map((q, i) => new Option(`第 ${i + 1} 题 · ${q.title}`, q.id)));
     if (batch.some((q) => q.id === selected)) picker.value = selected;
     picker.dataset.batch = state.batch.id;
@@ -1352,17 +1352,25 @@ function render() {
 
   const p = batch?.find((q) => q.id === picker.value) || state.poll;
   const onlineCount = state.devices.filter((d) => d.online).length;
-  const maxDevices = state.max_devices || 10;
 
-  if (state.poll?.id !== lastPollId) {
+  if (stageView) {
+    if (state.poll?.id !== lastPollId && state.poll?.phase === "open") stageMaskCounts = true;
+    if (state.poll?.phase === "published" && lastPollPhase !== "published") stageMaskCounts = false;
     lastPollId = state.poll?.id || null;
-    if (state.poll && state.poll.phase === "open") stageMaskCounts = true;
+    lastPollPhase = state.poll?.phase || null;
+    renderStage(p, batch, onlineCount);
+    renderStageDeadline(state.poll);
+    updateButtons();
+    return;
   }
-  if (state.poll?.phase === "published" && lastPollPhase !== "published") {
-    stageMaskCounts = false;
+  if (state.latest_report !== historyHead || state.history_count !== historyCount) {
+    historyHead = state.latest_report;
+    historyCount = state.history_count;
+    loadHistory();
   }
-  lastPollPhase = state.poll?.phase || null;
+  $("btn-stage").href = batch && p ? `/?view=stage&question=${encodeURIComponent(p.id)}` : "/?view=stage";
 
+  const maxDevices = state.max_devices || 10;
   $("current-report").hidden = !p || p.phase === "open" || state.latest_report !== state.poll.id;
   $("join-code").textContent = state.join_code;
   $("online").textContent = String(onlineCount);
@@ -1513,28 +1521,27 @@ function render() {
       renderedDevices = listState;
     }
   }
-  renderStage(p, batch, onlineCount);
   updateButtons();
 }
 
-/* ==================== 大屏模式切换 ==================== */
-function setStageOpen(open) {
-  stageOpen = open;
-  $("stage-overlay").hidden = !open;
-  document.body.style.overflow = open ? "hidden" : "";
-  if (open && state) {
-    renderStage(
-      activeLivePoll(),
-      state.batch?.polls,
-      state.devices.filter((d) => d.online).length,
-    );
-  }
-  if (window.pywebview?.api?.set_fullscreen) {
-    window.pywebview.api.set_fullscreen(open);
-  } else if (open && document.documentElement.requestFullscreen && !document.fullscreenElement) {
-    document.documentElement.requestFullscreen().catch(() => {});
-  } else if (!open && document.fullscreenElement && document.exitFullscreen) {
-    document.exitFullscreen().catch(() => {});
+/* ==================== 独立大屏 ==================== */
+if (stageView) {
+  document.title = "共选 · 现场大屏";
+  document.querySelector(".topbar").hidden = true;
+  document.querySelector("main").hidden = true;
+  $("stage-overlay").hidden = false;
+  $("stage-overlay").querySelector(".stage-top").after($("notice"));
+  document.addEventListener("fullscreenchange", () => {
+    $("stage-fullscreen").textContent = document.fullscreenElement ? "退出全屏" : "全屏";
+  });
+}
+
+async function toggleStageFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await $("stage-overlay").requestFullscreen();
+  } catch {
+    notice("请使用浏览器菜单的全屏功能。");
   }
 }
 
@@ -1564,6 +1571,10 @@ async function refresh() {
     if (sequence !== refreshSequence) return;
     $("dot").classList.remove("on");
     $("connection").textContent = "服务已断开 · 正在重连";
+    if (stageView) {
+      $("stage-phase-text").textContent = "服务已断开 · 正在重连";
+      renderStageDeadline(null);
+    }
     state = null;
     updateButtons();
   }
@@ -1601,8 +1612,7 @@ $("btn-copy-result").onclick = () => {
 $("btn-export-png").onclick = () => exportPollImage(activeLivePoll());
 $("stage-export").onclick = () => exportPollImage(activeLivePoll());
 
-$("btn-stage").onclick = () => setStageOpen(true);
-$("stage-exit").onclick = () => setStageOpen(false);
+$("stage-fullscreen").onclick = toggleStageFullscreen;
 $("stage-prev").onclick = () => stepBatchQuestion(-1);
 $("stage-next").onclick = () => stepBatchQuestion(1);
 $("stage-toggle-theme").onclick = () => {
@@ -1846,20 +1856,16 @@ document.addEventListener("keydown", (event) => {
   const tag = document.activeElement?.tagName;
   const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-    if (!stageOpen && !$("poll-form").hidden && !$("start").disabled) {
+    if (!stageView && !$("poll-form").hidden && !$("start").disabled) {
       event.preventDefault();
       $("poll-form").requestSubmit();
-    } else if (!stageOpen && !$("append-form").hidden && !$("append-submit").disabled) {
+    } else if (!stageView && !$("append-form").hidden && !$("append-submit").disabled) {
       event.preventDefault();
       $("append-form").requestSubmit();
     }
     return;
   }
-  if (event.key === "Escape" && stageOpen) {
-    setStageOpen(false);
-    return;
-  }
-  if (stageOpen && !typing && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+  if (stageView && !typing && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
     event.preventDefault();
     stepBatchQuestion(event.key === "ArrowLeft" ? -1 : 1);
     return;
@@ -1872,23 +1878,27 @@ document.addEventListener("keydown", (event) => {
     !event.altKey
   ) {
     event.preventDefault();
-    setStageOpen(!stageOpen);
+    if (stageView) toggleStageFullscreen();
+    else $("btn-stage").click();
   }
 });
 
 setInterval(() => {
   if (state?.poll?.phase === "open" && state.poll.deadline_at_ms) {
-    renderDeadline(state.poll);
+    if (stageView) renderStageDeadline(state.poll);
+    else renderDeadline(state.poll);
   }
 }, 250);
 
-fetch("/font-coverage.json")
-  .then((r) => r.json())
-  .then((data) => {
-    coverage = data.ranges;
-    document.querySelectorAll(".draft-question").forEach(checkCardFont);
-  })
-  .catch(() => notice("字库清单未加载，请刷新页面。"));
+if (!stageView) {
+  fetch("/font-coverage.json")
+    .then((r) => r.json())
+    .then((data) => {
+      coverage = data.ranges;
+      document.querySelectorAll(".draft-question").forEach(checkCardFont);
+    })
+    .catch(() => notice("字库清单未加载，请刷新页面。"));
+}
 
 async function poll() {
   await refresh();

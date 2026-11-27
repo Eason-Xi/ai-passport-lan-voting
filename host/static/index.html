@@ -73,11 +73,13 @@
             <span>投票历史</span>
             <em class="count-chip" id="history-count" hidden>0</em>
           </a>
-          <button
-            type="button"
+          <a
             class="icon-btn stage-trigger"
             id="btn-stage"
-            title="进入现场大屏投屏模式（快捷键 F）"
+            href="/?view=stage"
+            target="_blank"
+            rel="noopener"
+            title="在独立页面打开大屏（快捷键 F）"
           >
             <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
               <path
@@ -89,7 +91,7 @@
               />
             </svg>
             <span>大屏投屏</span>
-          </button>
+          </a>
         </div>
       </div>
     </header>
@@ -396,8 +398,7 @@
     <div
       id="stage-overlay"
       class="stage-overlay"
-      role="dialog"
-      aria-modal="true"
+      role="region"
       aria-label="现场大屏模式"
       hidden
     >
@@ -426,7 +427,7 @@
         <div class="stage-tools">
           <button type="button" class="stage-btn" id="stage-toggle-theme">浅色展板</button>
           <button type="button" class="stage-btn" id="stage-toggle-mask">隐藏实时票数</button>
-          <button type="button" class="stage-btn exit" id="stage-exit">退出大屏</button>
+          <button type="button" class="stage-btn" id="stage-fullscreen">全屏</button>
         </div>
       </div>
 

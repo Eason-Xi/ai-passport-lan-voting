@@ -39,7 +39,7 @@ If broadcasts are filtered or the host runs older software, expand manual host s
 1. **Prepare questions.** Save a question in the library, such as a single-choice question about an activity location or a five-point feedback question. You can also save a completed voting draft.
 2. **Enroll the voters.** Save a device limit that suits the event. Use each voter's setup QR code and make sure the voter appears online. You can label devices by seat in the host console. Try a short test poll before the event.
 3. **Start voting.** Load questions from the library or add them in the editor. Choose the shared deadline and start the poll. Online voters receive the questions immediately. Use the append editor to send more questions during voting.
-4. **Project and publish.** Press `F` to open the projection view. The host can hide immediate tallies, close voting and publish the results. Switch between questions for a multi-question session.
+4. **Project and publish.** Press `F` or select the projection link to open the stage in a separate browser page. You can hide immediate tallies, close voting, publish the results and switch between questions.
 5. **Keep the results.** Expand the session in voting history to view each question, reuse the questions, download CSV or export PNG. Check the session title in the confirmation dialog before deleting a report.
 
 ## Troubleshooting
@@ -88,6 +88,12 @@ The console shows total votes across all questions, a picker for individual tall
 While a round is open, the main editor switches to adding a question to that round. Enter the question and two to six choices, then select the button to append and send it. The new question goes at the end and shares the round’s deadline. You can extend a single-question round as well, up to 50 questions in total.
 
 Devices that finished the original questions immediately receive the new one. Other participants continue their current question and reconnect at their own next unanswered question. The new question is included in the same history report and CSV. The editor also lets you prepare the next round and return to your in-progress question draft.
+
+## Project while preparing the next round
+
+Set the projector to extend your desktop. Move the stage page to the projector and select Full Screen. If your browser opens the stage as a tab, drag that tab into its own window first.
+
+Keep the host console on your computer and use “准备下一场投票” to prepare the next round. The stage keeps showing the current round and follows its countdown, closing and publication. Stage question navigation is independent. The stage switches to the next round when you start it.
 
 ## Timed voting
 

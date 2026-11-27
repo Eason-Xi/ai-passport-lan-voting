@@ -66,6 +66,18 @@ async function checkBatch(page) {
   await page.locator("#live-title").getByText("先去哪里",{exact:true}).waitFor();
   await page.locator("#result-caption").getByText(/本题已收 1 票/).waitFor();
   await page.screenshot({path:path.join(output,"batch-live.png"),fullPage:true});
+  const [stage] = await Promise.all([
+    page.context().waitForEvent("page"),
+    page.locator("#btn-stage").click(),
+  ]);
+  stage.on("pageerror", (error) => errors.push(error.message));
+  await stage.locator("#stage-title").getByText("先去哪里",{exact:true}).waitFor();
+  assert.equal(await stage.locator("#stage-code").innerText(), await page.locator("#join-code").innerText());
+  assert(!(await stage.locator("main").isVisible()));
+  await stage.locator("#stage-time-left").getByText(/剩余/).waitFor();
+  await stage.getByRole("button",{name:"下一题",exact:true}).click();
+  await stage.locator("#stage-title").getByText("是否骑车",{exact:true}).waitFor();
+  assert.equal(await page.locator("#live-question").inputValue(),polls[1].id);
   const append = page.locator("#append-form");
   await append.getByText(/排在第 4 题/).waitFor();
   const title = append.getByLabel("追加题目");
@@ -76,7 +88,11 @@ async function checkBatch(page) {
   await append.getByRole("button",{name:"追加并推送"}).click();
   await page.getByRole("status").getByText(/追加题目有重复选项/).waitFor();
   await page.getByRole("button",{name:"准备下一场投票"}).click();
-  assert.equal(await cards.nth(0).getByLabel("投票题目").inputValue(), "集合地点");
+  const draft = cards.nth(0).getByLabel("投票题目");
+  assert.equal(await draft.inputValue(), "集合地点");
+  await draft.fill("下一场草稿");
+  await stage.locator("#stage-title").getByText("是否骑车",{exact:true}).waitFor();
+  assert(!(await stage.getByText("下一场草稿",{exact:true}).isVisible()));
   await page.getByRole("button",{name:"返回本场追加题目"}).click();
   assert.equal(await title.inputValue(), "临时加一站吗");
   await append.getByLabel("选项 B",{exact:true}).fill("否");
@@ -115,6 +131,7 @@ async function checkBatch(page) {
   assert((await (await fetch(base+"/api/state")).json()).batch.polls.every(p=>!("deadline_at_ms" in p)));
   await page.getByRole("button",{name:"整组截止收票"}).click();
   await page.waitForFunction(()=>document.getElementById("phase").textContent==="已截止");
+  await stage.locator("#stage-phase-text").getByText("已截止",{exact:true}).waitFor();
   await page.getByRole("link",{name:"本场统计已保存，查看统计"}).click();
   const history = page.locator("#history");
   const entry = history.locator("details").filter({has:page.locator("summary strong",{hasText:"集合地点"})});
@@ -130,6 +147,9 @@ async function checkBatch(page) {
   assert(csvBody.includes("先去哪里,1,B,车站,1,100.0%"));
   await page.getByRole("button",{name:"公布整组结果"}).click();
   await page.waitForFunction(()=>document.getElementById("phase").textContent==="结果已公布");
+  await stage.locator("#stage-phase-text").getByText("结果已公布",{exact:true}).waitFor();
+  await stage.locator("#stage-title").getByText("是否骑车",{exact:true}).waitFor();
+  assert.equal(await draft.inputValue(), "下一场草稿");
   const shown = page.waitForResponse(r => r.url() === base+"/api/show_result" && r.request().method()==="POST");
   await page.getByRole("button",{name:"在投票器上展示本题"}).click();
   assert((await shown).ok());
@@ -142,6 +162,7 @@ async function checkBatch(page) {
   await page.locator("#result-caption").getByText(/本题已收 0 票/).waitFor();
   await page.setViewportSize({width:390,height:844});
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),"批量投票手机页面横向溢出");
+  return stage;
 }
 async function checkTimedPoll(page) {
   const create = page.locator("#poll-form"), edit = page.locator("#deadline-form");
@@ -205,7 +226,7 @@ async function checkTimedPoll(page) {
   await page.locator("#publish").click();
   await phase.getByText("结果已公布").waitFor();
 }
-async function checkVoteModes(page) {
+async function checkVoteModes(page, stage) {
   const form = page.locator("#poll-form");
   const cards = form.locator(".draft-question");
   const first = cards.nth(0);
@@ -226,6 +247,9 @@ async function checkVoteModes(page) {
   await rating.getByLabel("投票模式").selectOption("rating");
   await page.screenshot({path:path.join(output,"vote-modes-editor.png"),fullPage:true});
   await form.getByRole("button",{name:"一次发起 3 题"}).click();
+  await stage.locator("#stage-title").getByText("活动地点",{exact:true}).waitFor();
+  await stage.locator("#stage-phase-text").getByText("正在收票",{exact:true}).waitFor();
+  await stage.close();
   const append = page.locator("#append-form");
   await append.getByLabel("追加题目").fill("哪个季节更冷");
   await append.getByLabel("投票模式").selectOption("quiz");
@@ -271,9 +295,15 @@ async function checkDeviceLimit(page) {
   await page.getByRole("button", {name:"保存上限"}).click();
   await page.locator("#online-limit").getByText("/ 64 台", {exact:true}).waitFor();
   await page.locator("#device-count").getByText("已登记 10 / 64 台", {exact:true}).waitFor();
-  await page.locator("#btn-stage").click();
-  await page.locator("#stage-device-limit").getByText("/ 64", {exact:true}).waitFor();
-  await page.locator("#stage-exit").click();
+  await page.locator("#btn-stage").focus();
+  const [stage] = await Promise.all([
+    page.context().waitForEvent("page"),
+    page.keyboard.press("f"),
+  ]);
+  await stage.locator("#stage-device-limit").getByText("/ 64", {exact:true}).waitFor();
+  await stage.getByRole("button",{name:"全屏",exact:true}).click();
+  await stage.getByRole("button",{name:"退出全屏",exact:true}).click();
+  await stage.close();
   await page.reload();
   await field.waitFor();
   assert.equal(await field.inputValue(), "64");
@@ -577,8 +607,8 @@ async function run() {
     state.poll.id,
   );
   await checkTimedPoll(page);
-  await checkBatch(page);
-  await checkVoteModes(page);
+  const stage = await checkBatch(page);
+  await checkVoteModes(page, stage);
   await checkDeviceLimit(page);
   await checkQuestionLibrary(page);
   await checkHistoryDelete(page);
@@ -602,6 +632,7 @@ async function run() {
           "禁止重复发题",
           "未支持字形提示",
           "移动端无横向溢出",
+          "独立大屏同步截止、公布和新场次，主持台可备题，大屏翻题保留主持台视角",
           "定时发题、取消与更改截止时间、跨时区输入、刷新后自动截止与手动公布",
           "批量增删题目、整批校验、按人进度、逐题计票、整组截止和结果展示",
           "收票中追加题目并推送、保留草稿和正在查看的题目、追加题进入本场历史",
