@@ -6,6 +6,22 @@ One computer hosts a poll for ten registered AI Passport voters by default. The 
 
 This repository contains the 0.4.0 voter firmware and host console. The voter uses an ESP32-C3, 8 MB of flash and three buttons. Board support comes from [AI Passport](https://github.com/Eason-Xi/ai-passport) under its original MIT license. The [project brief](docs/LAN_Voting_PRD_v0.1_重建版.md) is available in Simplified Chinese.
 
+## Download and prepare
+
+You need a host computer, at least one **FoloToy AI Passport (ESP32-C3, 8 MB flash)** and a local network with 2.4 GHz Wi-Fi that lets clients reach each other. The host computer can use Ethernet on the same router. A phone is used for setting up each voter.
+
+Open [GitHub Releases](https://github.com/Eason-Xi/ai-passport-lan-voting/releases/latest) and choose the files you need from **Assets**.
+
+| Use | Download | How to use it |
+| --- | --- | --- |
+| Apple silicon Mac | `gongxuan-desktop-macos-arm64.zip` | Unzip and open the app. macOS may ask you to approve the locally signed app in Privacy & Security on first launch. |
+| Windows x64 | `gongxuan-desktop-windows-x64.exe` | Double-click to start. Install the Edge WebView2 Runtime if your system lacks it. |
+| Full voter firmware | `FoloToy-AI-Passport-full.bin` | Flash at **0x0** on a compatible device for a clean installation. This can reset stored network settings. |
+| Voter application update | `FoloToy-AI-Passport.bin` | Verify that the device uses this project's 8 MB partition layout. Flash only the application at **0x10000** to retain network settings. |
+| Download integrity | `SHA256SUMS.txt` | Compare your download with its SHA-256 checksum. |
+
+Opening the desktop app starts the host service. You can also visit the [local console](http://127.0.0.1:8765) or the [IPv6 loopback console](http://[::1]:8765) on the host computer. For Intel Macs and browser-only use, follow the source instructions below. Existing users can keep their database when upgrading.
+
 ## Run a session
 
 1. Install the host software as described below, then use the [host launcher](host/start.command) and open the [local console](http://127.0.0.1:8765). You can also use the [IPv6 loopback address](http://[::1]:8765) if the launcher lists it. Find the six-digit enrollment code. When upgrading a running host, restart it with the same database.
@@ -17,6 +33,24 @@ This repository contains the 0.4.0 voter firmware and host console. The voter us
 The computer can use Ethernet or Wi-Fi. Automatic discovery uses UDP 48765 on the same IPv4 subnet. Voting uses the host TCP port (8765 by default). Discovery carries a random challenge, a public host identifier and a port. A paired voter can find the same host after its IP address or port changes. Hosts using different databases have different identities. Hold OK and confirm reconfiguration to change hosts.
 
 If broadcasts are filtered or the host runs older software, expand manual host settings and enter a private IPv4 address such as `192.168.1.20` or `192.168.1.20:9876`. The console lists the full addresses under participating devices. Use a network that allows clients to communicate. Rejoin the device hotspot if the phone disconnects during a Wi-Fi channel change.
+
+## Host an event
+
+1. **Prepare questions.** Save a question in the library, such as a single-choice question about an activity location or a five-point feedback question. You can also save a completed voting draft.
+2. **Enroll the voters.** Save a device limit that suits the event. Use each voter's setup QR code and make sure the voter appears online. You can label devices by seat in the host console. Try a short test poll before the event.
+3. **Start voting.** Load questions from the library or add them in the editor. Choose the shared deadline and start the poll. Online voters receive the questions immediately. Use the append editor to send more questions during voting.
+4. **Project and publish.** Press `F` to open the projection view. The host can hide immediate tallies, close voting and publish the results. Switch between questions for a multi-question session.
+5. **Keep the results.** Expand the session in voting history to view each question, reuse the questions, download CSV or export PNG. Check the session title in the confirmation dialog before deleting a report.
+
+## Troubleshooting
+
+| Symptom | What to do |
+| --- | --- |
+| The phone does not open the setup portal | Join the voter's hotspot, then scan the second QR code or open the [setup portal](http://192.168.4.1/). Stay connected if the phone reports that the hotspot has no internet. |
+| The enrollment code is rejected or several hosts appear | Select the public host ID shown by the intended console. For manual setup, copy that host's LAN address and port from participating devices and enter the matching enrollment code. |
+| The voter cannot find the computer | Check that the voter is on 2.4 GHz Wi-Fi and can reach the host. Discovery uses UDP 48765 and voting uses TCP 8765 by default. |
+| A new voter cannot enroll | Check the device limit. Offline registrations occupy slots. Remove an unused offline registration or raise the limit. |
+| Move your voting history to another computer | Stop the host before copying its SQLite database, or use the SQLite backup API. Reuse the database to retain your history, question library and enrollment code. Find its storage path below. |
 
 ## Question library
 
@@ -118,6 +152,13 @@ python3 tools/gen_vote_font.py check
 ```
 
 ## Validation and flashing
+
+To flash a downloaded Release image, connect the voter with a USB data cable and activate ESP-IDF 5.5.3. Replace `PORT` with its serial port, such as `/dev/cu.usbmodem101` on macOS or `COM5` on Windows. Choose the command for a full install or an application-only update as appropriate.
+
+```sh
+python -m esptool --chip esp32c3 -p PORT -b 460800 write_flash 0x0 FoloToy-AI-Passport-full.bin
+python -m esptool --chip esp32c3 -p PORT -b 460800 write_flash 0x10000 FoloToy-AI-Passport.bin
+```
 
 Install the host dependencies above, activate ESP-IDF 5.5.3 and run these commands from the repository root.
 
