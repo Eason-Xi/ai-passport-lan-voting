@@ -99,6 +99,13 @@ static esp_err_t load_settings(void)
     if (err != ESP_OK) return err;
     size_t length = sizeof(s_saved);
     err = nvs_get_blob(nvs, "network", &s_saved, &length);
+    if (err == ESP_OK && length == sizeof(s_saved) &&
+        memchr(s_saved.code, 0, sizeof(s_saved.code)) &&
+        strlen(s_saved.code) == 6 && strspn(s_saved.code, "0123456789") == 6) {
+        // 兼容从旧版 6 位入场码固件升级：保留已存 Wi-Fi 与主持台配置，等待本机直接输入新 4 位入场码或一键入场。
+        memset(s_saved.code, 0, sizeof(s_saved.code));
+        memcpy(s_saved.code, "0000", 5);
+    }
     s_has_saved = err == ESP_OK && length == sizeof(s_saved) && s_saved.server[0] && vote_settings_valid(&s_saved);
     length = sizeof(s_persisted_vote);
     err = nvs_get_blob(nvs, "pending_v1", &s_persisted_vote, &length);
@@ -335,7 +342,7 @@ static esp_err_t setup_submit(httpd_req_t *req)
             copy_json_string(json, "code", config.code, sizeof(config.code)) && vote_settings_valid(&config);
     }
     cJSON_Delete(json);
-    if (!valid) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "请检查网络、密码、服务器 IPv4 地址及六位入场码");
+    if (!valid) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "请检查网络、密码、服务器 IPv4 地址及四位入场码");
     atomic_store(&s_setup_status, SETUP_QUEUED);
     if (xQueueSend(s_config_queue, &config, 0) != pdTRUE) {
         atomic_store(&s_setup_status, SETUP_WIFI_FAILED);
@@ -555,9 +562,9 @@ static bool poll_session(vote_view_t *view, int64_t now_ms, EventBits_t bits, co
         s_sync_at = now_ms + 5000;
         s_send_at = 0;
     }
-    packet_t packet;
+    static packet_t packet;
     if (xQueueReceive(s_rx_queue, &packet, 0) == pdTRUE && packet.generation == generation) {
-        vote_snapshot_t snapshot;
+        static vote_snapshot_t snapshot;
         int64_t remaining_ms;
         cJSON *json = vote_parse_json_object(packet.text, sizeof(packet.text) - 1);
         if (vote_snapshot_from_json(json, &snapshot, &remaining_ms)) {
@@ -823,9 +830,9 @@ static void switch_tick(vote_view_t *view, int64_t now_ms, EventBits_t bits)
         send_text(hello);
         s_hello = true;
     }
-    packet_t packet;
+    static packet_t packet;
     if (xQueueReceive(s_rx_queue, &packet, 0) == pdTRUE && packet.generation == generation) {
-        vote_snapshot_t snapshot;
+        static vote_snapshot_t snapshot;
         int64_t remaining_ms;
         cJSON *json = vote_parse_json_object(packet.text, sizeof(packet.text) - 1);
         if (vote_snapshot_from_json(json, &snapshot, &remaining_ms) && (bits & WS_READY)) {

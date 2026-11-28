@@ -2,7 +2,7 @@
 
 # LAN voting
 
-One computer hosts a poll for ten registered AI Passport voters by default. The host can set a limit from 1 to 200. Each question has two to six options. A device locks its first confirmed choice for that question. The host sees live statistics and publishes the final result to all voters. The session runs on the local network.
+One computer hosts a poll for ten registered AI Passport voters by default. The host can set a limit from 1 to 200. Each question has two to ten options (A–J) and supports built-in or reusable custom voting modes. Before starting a round, the host can choose all devices, specific selected devices, or excluded devices, and lock the roster once voting begins. A device locks its first confirmed choice for that question. The host sees live statistics and publishes the final result to voters. The session runs on the local network.
 
 This repository contains the 0.5.0 voter firmware and the 0.5.1 host console. The voter uses an ESP32-C3, 8 MB of flash and three buttons. Board support comes from [AI Passport](https://github.com/Eason-Xi/ai-passport) under its original MIT license. The [project brief](docs/LAN_Voting_PRD_v0.1_重建版.md) is available in Simplified Chinese.
 
@@ -24,13 +24,13 @@ Opening the desktop app starts the host service. You can also visit the [local c
 
 ## Run a session
 
-1. Install the host software as described below, then use the [host launcher](host/start.command) and open the [local console](http://127.0.0.1:8765). You can also use the [IPv6 loopback address](http://[::1]:8765) if the launcher lists it. Find the six-digit enrollment code. When upgrading a running host, restart it with the same database.
+1. Install the host software as described below, then use the [host launcher](host/start.command) and open the [local console](http://127.0.0.1:8765). You can also use the [IPv6 loopback address](http://[::1]:8765) if the launcher lists it. Find the four-digit enrollment code (you can customize it or generate a new one inline in the console). When upgrading a running host, restart it with the same database; legacy 6-digit codes are migrated automatically to 4 digits.
 2. Scan the QR code on the voter with a phone camera and join its hotspot. On supported phones the setup portal opens automatically. If it stays closed, scan the second code displayed after the phone joins, or open the [setup page](http://192.168.4.1/). UP/DOWN switches codes. The first screen also shows the hotspot name and password.
 3. Select the venue's 2.4 GHz Wi-Fi and enter its password and the enrollment code. Open networks hide the password field. Hidden networks allow manual entry. The voter finds the host automatically. If several hosts answer, tap the public identifier shown on the intended console. The device saves its settings and restarts after receiving a valid host snapshot. Wi-Fi, discovery and enrollment errors can be retried on the same page.
 4. Enter a question and choose its voting mode. Choose manual closing (the default), a duration of 30 seconds, 1 minute or 5 minutes, or a date and time in Beijing, then start voting. On each voter, UP/DOWN selects an option, OK opens confirmation, and the next OK submits. Either direction cancels confirmation. The success screen means the computer recorded the vote.
 5. Closing voting stops new submissions while keeping results private. Publishing from either the open or closed phase sends the final counts and percentages to voters. Use UP/DOWN on the results page to scroll long option labels. Start a new question after publishing the current result.
 
-The computer can use Ethernet or Wi-Fi. Automatic discovery uses UDP 48765 on the same IPv4 subnet. Voting uses the host TCP port (8765 by default). Discovery carries a random challenge, a public host identifier and a port. A paired voter can find the same host after its IP address or port changes. Hosts using different databases have different identities. To switch hosts or enrollment codes without reconnecting Wi-Fi, hold OK on the voter and choose one-tap join (while the host's 5-minute open-join window is active) or enter the 6-digit code directly with the three buttons; the phone setup portal also lets you keep the current Wi-Fi and update only the code.
+The computer can use Ethernet or Wi-Fi. Automatic discovery uses UDP 48765 on the same IPv4 subnet. Voting uses the host TCP port (8765 by default). Discovery carries a random challenge, a public host identifier and a port. A paired voter can find the same host after its IP address or port changes. Hosts using different databases have different identities. To switch hosts or enrollment codes without reconnecting Wi-Fi, hold OK on the voter and choose one-tap join (while the host's 5-minute open-join window is active) or enter the 4-digit code directly with the three buttons; the phone setup portal also lets you keep the current Wi-Fi and update only the code. Online devices can also be removed (kicked) from the console and remain blocked until the enrollment code is rotated.
 
 If broadcasts are filtered or the host runs older software, expand manual host settings and enter a private IPv4 address such as `192.168.1.20` or `192.168.1.20:9876`. The console lists the full addresses under participating devices. Use a network that allows clients to communicate. Rejoin the device hotspot if the phone disconnects during a Wi-Fi channel change.
 
@@ -68,16 +68,17 @@ Choose the voting mode while editing each question. A round can mix modes, inclu
 
 | Mode | Setup and tally |
 | --- | --- |
-| Single choice | Enter two to six options. The console shows each option's count and share. |
+| Single choice | Enter two to ten options (A–J). The console shows each option's count and share. |
 | Approval | The choices are approve, oppose and abstain. Approval requires more than half of approve and oppose ballots combined. Abstentions count toward participation and total ballots. A tie falls short of a majority. A round with zero approve or oppose votes shows no decision. |
 | Five-point rating | The choices are 1 to 5. The console shows the average and how many voters chose each score. |
-| Quiz | Enter two to six options and specify the right answer. The console shows the answer, number of correct responses and percentage correct. |
+| Quiz | Enter two to ten options and specify the right answer. The console shows the answer, number of correct responses and percentage correct. |
+| Custom modes | Save up to 30 reusable custom modes (custom fixed/free options up to 10 choices, custom approval thresholds and abstain rules, weighted scoring with units, or preset quiz choices). Issued polls and library items freeze a rule snapshot so history stays accurate even if a mode is later edited or deleted. |
 
-All four modes accept one confirmed choice per device per question. Existing AI Passport units show the option tallies after publication. The host console and CSV also include the statistics for each question's mode.
+All modes accept one confirmed choice per device per question. Flash the updated voter firmware to use 4-digit enrollment codes and 7–10 option questions (published results paginate across 6 visible rows on the voter display). The host console, stage view and CSV include each question's mode statistics and round participation roster.
 
 ## Open several questions together
 
-Fill in the first question, then use the add-question button for each additional one. A batch supports up to 50 questions with two to six distinct options per question. Choose a common deadline and start the batch with one click. If a question is invalid, the console identifies it and keeps the batch in the editor. All questions open together.
+Fill in the first question, then use the add-question button for each additional one. A batch supports up to 50 questions with two to ten distinct options per question. Choose a common deadline and start the batch with one click. If a question is invalid, the console identifies it and keeps the batch in the editor. All questions open together.
 
 Each voter starts with the first question and automatically advances once the host records its choice. Participants proceed at their own pace. The host locks the first vote per device and question and uses those records to resume after a disconnect or restart. Version 0.4 displays the current question number, the number answered and a completion message after the final vote.
 
@@ -85,7 +86,7 @@ The console shows total votes across all questions, a picker for individual tall
 
 ## Add a question while voting is open
 
-While a round is open, the main editor switches to adding a question to that round. Enter the question and two to six choices, then select the button to append and send it. The new question goes at the end and shares the round’s deadline. You can extend a single-question round as well, up to 50 questions in total.
+While a round is open, the main editor switches to adding a question to that round. Enter the question and two to ten choices, then select the button to append and send it. The new question goes at the end and shares the round’s deadline and locked device roster. You can extend a single-question round as well, up to 50 questions in total.
 
 Devices that finished the original questions immediately receive the new one. Other participants continue their current question and reconnect at their own next unanswered question. The new question is included in the same history report and CSV. The editor also lets you prepare the next round and return to your in-progress question draft.
 

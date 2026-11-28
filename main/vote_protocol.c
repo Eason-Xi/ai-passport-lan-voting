@@ -132,8 +132,9 @@ bool vote_extract_join_code(const cJSON *root, char out[7])
 {
     if (!root || !out) return false;
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, "join_code");
-    if (!cJSON_IsString(item) || strlen(item->valuestring) != 6 ||
-        strspn(item->valuestring, "0123456789") != 6) return false;
-    memcpy(out, item->valuestring, 7);
+    if (!cJSON_IsString(item) || strlen(item->valuestring) != 4 ||
+        strspn(item->valuestring, "0123456789") != 4) return false;
+    memset(out, 0, 7);
+    memcpy(out, item->valuestring, 5);
     return true;
 }

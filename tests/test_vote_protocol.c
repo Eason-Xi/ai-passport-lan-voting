@@ -55,21 +55,32 @@ int main(int argc, char **argv)
         assert(!vote_parse_snapshot(invalid[i], &snapshot));
         assert(!memcmp(&before, &snapshot, sizeof(snapshot)));
     }
-    assert(vote_parse_snapshot("{\"v\":1,\"type\":\"state\",\"poll\":null}", &snapshot));
+    assert(vote_parse_snapshot("{\"v\":1,\"type\":\"state\",\"poll\":null,\"standby_reason\":\"excluded\"}", &snapshot));
     assert(snapshot.phase == VOTE_IDLE && snapshot.my_choice == -1 && remaining == -1);
+    const char *ten_pub =
+        "{\"v\":1,\"type\":\"state\",\"poll\":{\"id\":\"0123456789abcdef\",\"phase\":\"published\",\"title\":\"十项测验\","
+        "\"options\":[\"一\",\"二\",\"三\",\"四\",\"五\",\"六\",\"七\",\"八\",\"九\",\"十\"],"
+        "\"my_choice\":9,\"counts\":[0,1,0,0,0,0,0,0,0,2],\"total\":3}}";
+    assert(vote_parse_snapshot(ten_pub, &snapshot));
+    assert(snapshot.option_count == 10 && snapshot.my_choice == 9 && snapshot.counts[9] == 2 && snapshot.total == 3);
+    const char *eleven_open =
+        "{\"v\":1,\"type\":\"state\",\"poll\":{\"id\":\"0123456789abcdef\",\"phase\":\"open\",\"title\":\"超限\","
+        "\"options\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\",\"11\"],\"my_choice\":-1}}";
+    assert(!vote_parse_snapshot(eleven_open, &snapshot));
     cJSON *literal = vote_parse_json_object("{\"text\":\"\\\\u0000\"}", 128);
     assert(literal && !strcmp(cJSON_GetObjectItem(literal, "text")->valuestring, "\\u0000"));
     cJSON_Delete(literal);
     char extracted[7] = {0};
-    cJSON *with_code = vote_parse_json_object("{\"v\":1,\"type\":\"state\",\"poll\":null,\"join_code\":\"042918\"}", 128);
-    assert(with_code && vote_extract_join_code(with_code, extracted) && !strcmp(extracted, "042918"));
+    cJSON *with_code = vote_parse_json_object("{\"v\":1,\"type\":\"state\",\"poll\":null,\"join_code\":\"0429\"}", 128);
+    assert(with_code && vote_extract_join_code(with_code, extracted) && !strcmp(extracted, "0429"));
     cJSON_Delete(with_code);
     const char *bad_codes[] = {
         "{\"v\":1,\"type\":\"state\",\"poll\":null}",
+        "{\"join_code\":\"123\"}",
         "{\"join_code\":\"12345\"}",
-        "{\"join_code\":\"1234567\"}",
-        "{\"join_code\":\"12345a\"}",
-        "{\"join_code\":123456}"
+        "{\"join_code\":\"042918\"}",
+        "{\"join_code\":\"123a\"}",
+        "{\"join_code\":1234}"
     };
     for (size_t i = 0; i < sizeof(bad_codes)/sizeof(bad_codes[0]); i++) {
         cJSON *obj = vote_parse_json_object(bad_codes[i], 128);

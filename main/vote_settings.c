@@ -23,7 +23,7 @@ bool vote_settings_valid(const vote_settings_t *s)
         !memchr(s->code, 0, sizeof(s->code)) || !s->ssid[0]) return false;
     size_t password_length = strlen(s->password);
     if (password_length && (password_length < 8 || password_length > 63)) return false;
-    if (strlen(s->code) != 6 || strspn(s->code, "0123456789") != 6) return false;
+    if (strlen(s->code) != 4 || strspn(s->code, "0123456789") != 4) return false;
     // 首次空地址触发自动发现，入场后保存公开会场标识，继续兼容旧版固定地址。
     if (!s->server[0]) return true;
     if (!strncmp(s->server, "auto:", 5))

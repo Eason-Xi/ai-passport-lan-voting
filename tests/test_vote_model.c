@@ -8,9 +8,9 @@ int main(void)
 {
     vote_model_t model;
     vote_model_init(&model);
-    vote_snapshot_t poll = {.id = "0000000000000001", .title = "选择你的答案", .phase = VOTE_OPEN, .option_count = 6, .my_choice = -1};
+    vote_snapshot_t poll = {.id = "0000000000000001", .title = "选择你的答案", .phase = VOTE_OPEN, .option_count = 10, .my_choice = -1};
     vote_model_apply(&model, &poll);
-    assert(!vote_model_key(&model, VOTE_UP) && model.selected == 5);
+    assert(!vote_model_key(&model, VOTE_UP) && model.selected == 9);
     assert(!vote_model_key(&model, VOTE_DOWN) && model.selected == 0);
     assert(!vote_model_key(&model, VOTE_OK) && model.confirming);
     assert(!vote_model_key(&model, VOTE_UP) && !model.confirming && model.selected == 0);
@@ -70,8 +70,12 @@ int main(void)
     char huge[VOTE_MESSAGE_BYTES]; memset(huge, 'a', sizeof(huge));
     assert(vote_rx_push(&rx, 1, true, sizeof(huge), 0, huge, sizeof(huge)) == -1);
     assert(vote_rx_push(&rx, 1, true, 2, 0, "{}", 2) == 1);
-    vote_settings_t settings = {.version=1, .ssid="测试网络", .password="testpass", .server="ws://192.168.1.2:8765/ws", .code="123456"};
+    vote_settings_t settings = {.version=1, .ssid="测试网络", .password="testpass", .server="ws://192.168.1.2:8765/ws", .code="1234"};
     assert(vote_settings_valid(&settings));
+    strcpy(settings.code, "123456"); assert(!vote_settings_valid(&settings));
+    strcpy(settings.code, "123"); assert(!vote_settings_valid(&settings));
+    strcpy(settings.code, "12a4"); assert(!vote_settings_valid(&settings));
+    strcpy(settings.code, "1234");
     strcpy(settings.server, "ws://127.0.0.1:8765/ws"); assert(!vote_settings_valid(&settings));
     strcpy(settings.server, "ws://192.168.1.2:8765/ws/evil"); assert(!vote_settings_valid(&settings));
     strcpy(settings.server, "ws://10.0.0.2:8765/ws"); assert(vote_settings_valid(&settings));
@@ -93,16 +97,16 @@ int main(void)
     assert(vote_switch_key(&sw, VOTE_DOWN, false) == VOTE_SW_ACT_NONE && sw.menu_index == 2);
     assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_ENTER_SETUP);
     assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.menu_index == 1);
-    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_NONE && sw.mode == VOTE_SWITCH_CODE && !strcmp(sw.code, "000000") && sw.cursor == 0);
+    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_NONE && sw.mode == VOTE_SWITCH_CODE && !strcmp(sw.code, "0000") && sw.cursor == 0);
     assert(vote_switch_key(&sw, VOTE_DOWN, false) == VOTE_SW_ACT_NONE && sw.code[0] == '9');
     assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.code[0] == '0');
     assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.code[0] == '1');
-    for (int i = 0; i < 5; i++) assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_NONE && sw.cursor == i + 1);
-    assert(vote_switch_key(&sw, VOTE_OK, true) == VOTE_SW_ACT_NONE && sw.cursor == 4);
-    assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.code[4] == '1');
-    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_NONE && sw.cursor == 5);
-    assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.code[5] == '1');
-    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_SCAN_CODE && sw.mode == VOTE_SWITCH_SCAN && !strcmp(sw.code, "100011"));
+    for (int i = 0; i < 3; i++) assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_NONE && sw.cursor == i + 1);
+    assert(vote_switch_key(&sw, VOTE_OK, true) == VOTE_SW_ACT_NONE && sw.cursor == 2);
+    assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.code[2] == '1');
+    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_NONE && sw.cursor == 3);
+    assert(vote_switch_key(&sw, VOTE_UP, false) == VOTE_SW_ACT_NONE && sw.code[3] == '1');
+    assert(vote_switch_key(&sw, VOTE_OK, false) == VOTE_SW_ACT_SCAN_CODE && sw.mode == VOTE_SWITCH_SCAN && !strcmp(sw.code, "1011"));
 
     vote_switch_host_t one[1] = {{.id = "00000000abcdef12", .open_join = false}};
     assert(vote_switch_apply_hosts(&sw, one, 1) && sw.mode == VOTE_SWITCH_JOINING && sw.host_count == 1);

@@ -154,13 +154,14 @@ void vote_switch_open_menu(vote_switch_t *sw)
 {
     memset(sw, 0, sizeof(*sw));
     sw->mode = VOTE_SWITCH_MENU;
-    memcpy(sw->code, "000000", 7);
+    memcpy(sw->code, "0000", 5);
 }
 
 void vote_switch_open_code(vote_switch_t *sw, const char *hint)
 {
-    if (strlen(sw->code) != 6 || strspn(sw->code, "0123456789") != 6) {
-        memcpy(sw->code, "000000", 7);
+    if (strlen(sw->code) != 4 || strspn(sw->code, "0123456789") != 4) {
+        memset(sw->code, 0, sizeof(sw->code));
+        memcpy(sw->code, "0000", 5);
     }
     sw->mode = VOTE_SWITCH_CODE;
     sw->open_join = false;
@@ -221,7 +222,7 @@ vote_switch_action_t vote_switch_key(vote_switch_t *sw, vote_key_t key, bool dou
             sw->hint[0] = 0;
             return VOTE_SW_ACT_NONE;
         }
-        if (sw->cursor < 5) {
+        if (sw->cursor < 3) {
             sw->cursor++;
             sw->failed = false;
             sw->hint[0] = 0;

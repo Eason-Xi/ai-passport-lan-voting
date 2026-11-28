@@ -8,6 +8,7 @@ import csv
 import io
 import ipaddress
 import json
+import math
 import re
 import secrets
 import socket
@@ -17,6 +18,7 @@ import time
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from aiohttp import WSMsgType, web
 
@@ -35,15 +37,27 @@ STATIC = resolve_static_dir()
 DEFAULT_DEVICE_LIMIT = 10
 MAX_DEVICE_LIMIT = 200
 MAX_ALIAS_LENGTH = 20
+MAX_POLL_OPTIONS = 10
+MAX_CUSTOM_MODES = 30
+MAX_CUSTOM_MODE_NAME = 20
+MAX_CUSTOM_MODE_GUIDE = 80
+MAX_CUSTOM_MODE_UNIT = 6
 MAX_MESSAGE = 4096
 MAX_BATCH_POLLS = 50
+ROSTER_MODES = frozenset(("all", "selected", "exclude"))
+DEVICE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+HEX16_RE = re.compile(r"^[0-9a-f]{16}$")
+JOIN_CODE_RE = re.compile(r"^[0-9]{4}$")
 MODE_LABELS = {"single": "普通单选", "approval": "赞成 / 反对 / 弃权", "rating": "五分评分", "quiz": "答题测验"}
+BUILTIN_MODE_NAMES = frozenset(v.lower() for v in MODE_LABELS.values())
 FIXED_OPTIONS = {
     "approval": ["赞成", "反对", "弃权"],
     "rating": ["1 分", "2 分", "3 分", "4 分", "5 分"],
 }
-INSERT_OPEN_POLL = """INSERT INTO polls (id,title,options,mode,correct_choice,phase,created,deadline_at_ms,batch_id)
-                      VALUES (?,?,?,?,?,'open',?,?,?)"""
+INSERT_OPEN_POLL = """INSERT INTO polls (
+    id,title,options,mode,mode_meta,correct_choice,phase,created,deadline_at_ms,batch_id,
+    roster_mode,roster_devices,roster_allow_late,roster_eligible,excluded_see_results
+) VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?)"""
 MAX_DEADLINE_MS = 253402300799999  # 公历 9999 年末的 Unix 毫秒数。
 OPEN_JOIN_DEFAULT_SECONDS = 300
 OPEN_JOIN_MAX_SECONDS = 300
@@ -55,6 +69,33 @@ FONT_POINTS = frozenset(
     for start, end in json.loads((STATIC / "font-coverage.json").read_text(encoding="utf-8"))["ranges"]
     for cp in range(start, end + 1)
 )
+
+
+class ApiError(ValueError):
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def _is_strict_int(value: object) -> bool:
+    return type(value) is int
+
+
+def _is_finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def clean_plain_text(raw: object, min_chars: int, max_chars: int, field_name: str) -> str:
+    if not isinstance(raw, str):
+        raise ValueError(f"{field_name}必须是文字")
+    text = raw.strip()
+    if not min_chars <= len(text) <= max_chars:
+        if min_chars == 0:
+            raise ValueError(f"{field_name}最多 {max_chars} 个字符")
+        raise ValueError(f"{field_name}须为 {min_chars}～{max_chars} 个字符")
+    if any(ord(c) < 32 or ord(c) == 127 for c in text):
+        raise ValueError(f"{field_name}不能包含换行或控制字符")
+    return text
 
 
 def supported_text(text: object, maximum: int, name: str) -> str:
@@ -73,6 +114,10 @@ def clock_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
+def random_join_code() -> str:
+    return f"{secrets.randbelow(10000):04d}"
+
+
 def read_deadline(data: dict, now: int) -> int | None:
     if "duration_seconds" in data:
         duration = data["duration_seconds"]
@@ -86,41 +131,256 @@ def read_deadline(data: dict, now: int) -> int | None:
     return deadline
 
 
-def read_question(data: dict) -> tuple[str, str, str, int | None]:
+def _read_pass_pct(raw: object) -> float:
+    if not _is_finite_number(raw) or not (0 < float(raw) <= 100):
+        raise ValueError("通过线须为大于 0 且不超过 100 的百分比数值")
+    return round(float(raw), 1)
+
+
+def _read_pass_op(raw: object) -> str:
+    if raw in ("gt", "gte"):
+        return str(raw)
+    raise ValueError("通过线判定方式无效")
+
+
+def _read_weights(raw: object, option_count: int) -> list[float]:
+    if not isinstance(raw, list) or len(raw) != option_count:
+        raise ValueError(f"需要为全部 {option_count} 个选项设置分值")
+    weights: list[float] = []
+    for idx, item in enumerate(raw, 1):
+        if not _is_finite_number(item) or not (-1000 <= float(item) <= 1000):
+            raise ValueError(f"第 {idx} 个选项的分值须为 -1000～1000 之间的数字")
+        val = round(float(item), 2)
+        weights.append(int(val) if val.is_integer() else val)
+    return weights
+
+
+def parse_custom_mode_input(data: dict) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("自定义模式格式无效")
+    name = clean_plain_text(data.get("name"), 1, MAX_CUSTOM_MODE_NAME, "模式名称")
+    if name.lower() in BUILTIN_MODE_NAMES:
+        raise ValueError("模式名称不能与内置投票模式重名")
+    raw_guide = data.get("guide")
+    guide = "" if raw_guide in (None, "") else clean_plain_text(raw_guide, 0, MAX_CUSTOM_MODE_GUIDE, "模式说明")
+
+    base_kind = data.get("base_kind")
+    if not isinstance(base_kind, str) or base_kind not in MODE_LABELS:
+        raise ValueError("基础统计类型无效")
+
+    fixed_options: list[str] | None = None
+    raw_fixed = data.get("fixed_options")
+    requires_fixed = base_kind in ("approval", "rating")
+    if requires_fixed or raw_fixed is not None:
+        if not isinstance(raw_fixed, list) or not 2 <= len(raw_fixed) <= MAX_POLL_OPTIONS:
+            raise ValueError(
+                f"该统计类型须预设 2～{MAX_POLL_OPTIONS} 个固定选项"
+                if requires_fixed
+                else f"预设选项须为 2～{MAX_POLL_OPTIONS} 项"
+            )
+        fixed_options = [supported_text(opt, 24, "预设选项") for opt in raw_fixed]
+        if len(set(fixed_options)) != len(fixed_options):
+            raise ValueError("预设选项不能重复")
+
+    rule_config: dict = {}
+    if base_kind == "approval":
+        count = len(fixed_options or [])
+        yes_index = data.get("yes_index", 0)
+        if not _is_strict_int(yes_index) or not 0 <= yes_index < count:
+            raise ValueError("请选择有效的「赞成/通过」选项")
+        raw_abstain = data.get("abstain_index", None)
+        abstain_index: int | None = None
+        if raw_abstain is not None:
+            if not _is_strict_int(raw_abstain) or not 0 <= raw_abstain < count:
+                raise ValueError("弃权选项下标无效")
+            if raw_abstain == yes_index:
+                raise ValueError("弃权项不能与赞成项相同")
+            if count < 3:
+                raise ValueError("仅有 2 个选项时不能设置弃权项")
+            abstain_index = raw_abstain
+        pass_pct = _read_pass_pct(data.get("pass_pct", 50))
+        pass_op = _read_pass_op(data.get("pass_op", "gt"))
+        if pass_pct == 100 and pass_op == "gt":
+            raise ValueError("100% 通过线请选用「达到（≥）」判定")
+        rule_config = {
+            "yes_index": yes_index,
+            "abstain_index": abstain_index,
+            "pass_pct": int(pass_pct) if float(pass_pct).is_integer() else pass_pct,
+            "pass_op": pass_op,
+        }
+    elif base_kind == "rating":
+        raw_unit = data.get("unit", "分")
+        unit = "分" if raw_unit is None else clean_plain_text(raw_unit, 0, MAX_CUSTOM_MODE_UNIT, "分值单位")
+        rule_config = {
+            "weights": _read_weights(data.get("weights"), len(fixed_options or [])),
+            "unit": unit,
+        }
+
+    return {
+        "name": name,
+        "guide": guide,
+        "base_kind": base_kind,
+        "fixed_options": fixed_options,
+        "rule_config": rule_config,
+    }
+
+
+def custom_mode_to_spec(custom: dict) -> dict:
+    spec: dict = {
+        "id": custom["id"],
+        "name": custom["name"],
+        "base_kind": custom["base_kind"],
+    }
+    if custom["base_kind"] == "approval":
+        spec["yes_index"] = custom.get("yes_index", 0)
+        spec["abstain_index"] = custom.get("abstain_index", None)
+        spec["pass_pct"] = custom.get("pass_pct", 50)
+        spec["pass_op"] = custom.get("pass_op", "gt")
+    elif custom["base_kind"] == "rating":
+        spec["weights"] = list(custom.get("weights") or [])
+        spec["unit"] = custom.get("unit", "分")
+    return spec
+
+
+def validate_mode_meta(raw: object, expected_mode: str, option_count: int) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("自定义模式快照格式无效")
+    raw_id = raw.get("id")
+    mode_id = raw_id if isinstance(raw_id, str) and HEX16_RE.fullmatch(raw_id) else "0000000000000000"
+    name = clean_plain_text(raw.get("name"), 1, MAX_CUSTOM_MODE_NAME, "模式名称")
+    spec: dict = {"id": mode_id, "name": name, "base_kind": expected_mode}
+    if expected_mode == "approval":
+        yes_index = raw.get("yes_index", 0)
+        if not _is_strict_int(yes_index) or not 0 <= yes_index < option_count:
+            raise ValueError("自定义表决模式的赞成项配置无效")
+        raw_abstain = raw.get("abstain_index", None)
+        abstain_index: int | None = None
+        if raw_abstain is not None:
+            if (
+                not _is_strict_int(raw_abstain)
+                or not 0 <= raw_abstain < option_count
+                or raw_abstain == yes_index
+                or option_count < 3
+            ):
+                raise ValueError("自定义表决模式的弃权项配置无效")
+            abstain_index = raw_abstain
+        pass_pct = _read_pass_pct(raw.get("pass_pct", 50))
+        pass_op = _read_pass_op(raw.get("pass_op", "gt"))
+        if pass_pct == 100 and pass_op == "gt":
+            raise ValueError("100% 通过线请选用「达到（≥）」判定")
+        spec.update(
+            yes_index=yes_index,
+            abstain_index=abstain_index,
+            pass_pct=int(pass_pct) if float(pass_pct).is_integer() else pass_pct,
+            pass_op=pass_op,
+        )
+    elif expected_mode == "rating":
+        raw_unit = raw.get("unit", "分")
+        unit = "分" if raw_unit is None else clean_plain_text(raw_unit, 0, MAX_CUSTOM_MODE_UNIT, "分值单位")
+        spec.update(weights=_read_weights(raw.get("weights"), option_count), unit=unit)
+    return spec
+
+
+def _read_custom_options(raw: object) -> list[str]:
+    if not isinstance(raw, list) or not 2 <= len(raw) <= MAX_POLL_OPTIONS:
+        raise ValueError(f"需要 2～{MAX_POLL_OPTIONS} 个选项")
+    options = [supported_text(option, 24, "选项") for option in raw]
+    if len(set(options)) != len(options):
+        raise ValueError("选项不能重复")
+    return options
+
+
+def read_question(
+    data: dict,
+    custom_mode_lookup: Callable[[str], dict | None] | None = None,
+) -> tuple[str, str, str, str | None, int | None]:
     if not isinstance(data, dict):
         raise ValueError("题目格式无效")
     title = supported_text(data.get("title"), 60, "题目")
-    mode = data.get("mode", "single")
-    if not isinstance(mode, str) or mode not in MODE_LABELS:
-        raise ValueError("投票模式无效")
-    options = FIXED_OPTIONS.get(mode)
-    if options is None:
-        raw = data.get("options")
-        if not isinstance(raw, list) or not 2 <= len(raw) <= 6:
-            raise ValueError("需要 2～6 个选项")
-        options = [supported_text(option, 24, "选项") for option in raw]
-        if len(set(options)) != len(options):
-            raise ValueError("选项不能重复")
+
+    mode_meta: dict | None = None
+    raw_custom_id = data.get("custom_mode_id")
+    if isinstance(raw_custom_id, str) and raw_custom_id.strip():
+        if not HEX16_RE.fullmatch(raw_custom_id):
+            raise ValueError("自定义模式编号无效")
+        found = custom_mode_lookup(raw_custom_id) if custom_mode_lookup else None
+        if found is not None:
+            mode = found["base_kind"]
+            options = list(found["fixed_options"]) if found["fixed_options"] else _read_custom_options(data.get("options"))
+            mode_meta = custom_mode_to_spec(found)
+        elif data.get("mode_meta") is not None:
+            mode = data.get("mode", "single")
+            if not isinstance(mode, str) or mode not in MODE_LABELS:
+                raise ValueError("投票模式无效")
+            options = _read_custom_options(data.get("options"))
+            mode_meta = validate_mode_meta(data.get("mode_meta"), mode, len(options))
+        else:
+            raise ValueError("所选自定义投票模式不存在或已被删除，请重新选择模式")
+    elif data.get("mode_meta") is not None:
+        mode = data.get("mode", "single")
+        if not isinstance(mode, str) or mode not in MODE_LABELS:
+            raise ValueError("投票模式无效")
+        options = _read_custom_options(data.get("options"))
+        mode_meta = validate_mode_meta(data.get("mode_meta"), mode, len(options))
+    else:
+        mode = data.get("mode", "single")
+        if not isinstance(mode, str) or mode not in MODE_LABELS:
+            raise ValueError("投票模式无效")
+        fixed = FIXED_OPTIONS.get(mode)
+        options = list(fixed) if fixed is not None else _read_custom_options(data.get("options"))
+
     correct_choice = data.get("correct_choice")
     if mode == "quiz":
         if type(correct_choice) is not int or not 0 <= correct_choice < len(options):
             raise ValueError("请为测验题选择有效的正确选项")
     else:
         correct_choice = None
-    return title, json.dumps(options, ensure_ascii=False), mode, correct_choice
+
+    mode_meta_json = json.dumps(mode_meta, ensure_ascii=False) if mode_meta is not None else None
+    return title, json.dumps(options, ensure_ascii=False), mode, mode_meta_json, correct_choice
 
 
-def mode_summary(mode, correct_choice, counts):
-    if mode == "approval":
-        yes, no, abstain = counts
-        valid = yes + no
-        return dict(yes=yes, no=no, abstain=abstain, approval_pct=100 * yes / valid if valid else None,
-                    passed=yes > no if valid else None)
+def mode_summary(mode: str, correct_choice: int | None, counts: list[int], mode_meta: dict | None = None) -> dict:
     total = sum(counts)
+    if mode == "approval":
+        yes_index = mode_meta.get("yes_index", 0) if mode_meta else 0
+        abstain_index = mode_meta.get("abstain_index") if (mode_meta and "abstain_index" in mode_meta) else 2
+        pass_pct = float(mode_meta.get("pass_pct", 50)) if mode_meta else 50.0
+        pass_op = mode_meta.get("pass_op", "gt") if mode_meta else "gt"
+        yes = counts[yes_index] if 0 <= yes_index < len(counts) else 0
+        abstain = counts[abstain_index] if (abstain_index is not None and 0 <= abstain_index < len(counts)) else 0
+        valid = max(0, total - abstain)
+        no = max(0, valid - yes)
+        approval_pct = (100 * yes / valid) if valid else None
+        if approval_pct is None:
+            passed = None
+        elif pass_op == "gte":
+            passed = approval_pct + 1e-9 >= pass_pct
+        else:
+            passed = approval_pct > pass_pct + 1e-9
+        result = dict(yes=yes, no=no, abstain=abstain, approval_pct=approval_pct, passed=passed)
+        if mode_meta:
+            result.update(
+                pass_pct=int(pass_pct) if pass_pct.is_integer() else pass_pct,
+                pass_op=pass_op,
+                has_abstain=abstain_index is not None,
+            )
+        return result
     if mode == "rating":
-        return {"average": sum(score * count for score, count in enumerate(counts, 1)) / total if total else None}
+        weights = mode_meta.get("weights") if mode_meta else None
+        if isinstance(weights, list) and len(weights) == len(counts):
+            weighted = sum(float(w) * c for w, c in zip(weights, counts))
+        else:
+            weighted = sum(score * count for score, count in enumerate(counts, 1))
+        average = weighted / total if total else None
+        result = {"average": average}
+        if mode_meta:
+            rounded_total = round(weighted, 2)
+            result["total_score"] = (int(rounded_total) if rounded_total.is_integer() else rounded_total) if total else None
+            result["unit"] = mode_meta.get("unit", "分")
+        return result
     if mode == "quiz":
-        correct = counts[correct_choice]
+        correct = counts[correct_choice] if (correct_choice is not None and 0 <= correct_choice < len(counts)) else 0
         return dict(correct_count=correct, correct_pct=100 * correct / total if total else None)
     return {}
 
@@ -135,11 +395,24 @@ class Store:
             PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, seen REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS kicked_devices (
+                device_id TEXT PRIMARY KEY, kicked_code TEXT NOT NULL, kicked_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS custom_modes (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, guide TEXT NOT NULL DEFAULT '',
+                base_kind TEXT NOT NULL, fixed_options TEXT, rule_config TEXT NOT NULL DEFAULT '{}',
+                updated_at_ms INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS polls (
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, options TEXT NOT NULL,
                 phase TEXT NOT NULL, created REAL NOT NULL, deadline_at_ms INTEGER, batch_id TEXT,
-                mode TEXT NOT NULL DEFAULT 'single', correct_choice INTEGER,
-                history_deleted INTEGER NOT NULL DEFAULT 0
+                mode TEXT NOT NULL DEFAULT 'single', mode_meta TEXT, correct_choice INTEGER,
+                history_deleted INTEGER NOT NULL DEFAULT 0,
+                roster_mode TEXT NOT NULL DEFAULT 'all',
+                roster_devices TEXT NOT NULL DEFAULT '[]',
+                roster_allow_late INTEGER NOT NULL DEFAULT 1,
+                roster_eligible TEXT,
+                excluded_see_results INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS votes (
                 poll_id TEXT NOT NULL, device_id TEXT NOT NULL, choice INTEGER NOT NULL,
@@ -148,11 +421,11 @@ class Store:
             CREATE TABLE IF NOT EXISTS poll_reports (
                 batch_id TEXT PRIMARY KEY, title TEXT NOT NULL, started_at_ms INTEGER NOT NULL, ended_at_ms INTEGER,
                 question_count INTEGER NOT NULL, participants INTEGER NOT NULL, total_votes INTEGER NOT NULL,
-                questions TEXT NOT NULL
+                roster_summary TEXT NOT NULL DEFAULT '', questions TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS question_library (
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, options TEXT NOT NULL, mode TEXT NOT NULL,
-                correct_choice INTEGER, revision INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
+                mode_meta TEXT, correct_choice INTEGER, revision INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
             );
         """)
         with self.db:
@@ -164,10 +437,31 @@ class Store:
                 self.db.execute("ALTER TABLE polls ADD COLUMN batch_id TEXT")
             if "mode" not in columns:
                 self.db.execute("ALTER TABLE polls ADD COLUMN mode TEXT NOT NULL DEFAULT 'single'")
+            if "mode_meta" not in columns:
+                self.db.execute("ALTER TABLE polls ADD COLUMN mode_meta TEXT")
             if "correct_choice" not in columns:
                 self.db.execute("ALTER TABLE polls ADD COLUMN correct_choice INTEGER")
             if "history_deleted" not in columns:
                 self.db.execute("ALTER TABLE polls ADD COLUMN history_deleted INTEGER NOT NULL DEFAULT 0")
+            if "roster_mode" not in columns:
+                self.db.execute("ALTER TABLE polls ADD COLUMN roster_mode TEXT NOT NULL DEFAULT 'all'")
+            if "roster_devices" not in columns:
+                self.db.execute("ALTER TABLE polls ADD COLUMN roster_devices TEXT NOT NULL DEFAULT '[]'")
+            if "roster_allow_late" not in columns:
+                self.db.execute("ALTER TABLE polls ADD COLUMN roster_allow_late INTEGER NOT NULL DEFAULT 1")
+            if "roster_eligible" not in columns:
+                self.db.execute("ALTER TABLE polls ADD COLUMN roster_eligible TEXT")
+            if "excluded_see_results" not in columns:
+                self.db.execute("ALTER TABLE polls ADD COLUMN excluded_see_results INTEGER NOT NULL DEFAULT 1")
+
+            lib_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(question_library)")}
+            if "mode_meta" not in lib_cols:
+                self.db.execute("ALTER TABLE question_library ADD COLUMN mode_meta TEXT")
+
+            rep_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(poll_reports)")}
+            if "roster_summary" not in rep_cols:
+                self.db.execute("ALTER TABLE poll_reports ADD COLUMN roster_summary TEXT NOT NULL DEFAULT ''")
+
             self.db.execute("UPDATE polls SET batch_id=id WHERE batch_id IS NULL")
             self.db.execute("CREATE INDEX IF NOT EXISTS polls_by_batch ON polls(batch_id)")
             # 旧版保留了原票和题目，但没有记录实际截止时刻。
@@ -177,12 +471,366 @@ class Store:
                 ORDER BY p.rowid
             """).fetchall():
                 self._save_report(batch, None)
-            self.db.execute("INSERT OR IGNORE INTO settings VALUES ('join_code', ?)", (f"{secrets.randbelow(1000000):06d}",))
+
+            # 新库初始化 4 位纯数字入场码；旧 6 位数据库自动升级为 4 位纯数字入场码。
+            existing_code = self.db.execute("SELECT value FROM settings WHERE key='join_code'").fetchone()
+            if existing_code is None:
+                self.db.execute("INSERT INTO settings VALUES ('join_code', ?)", (random_join_code(),))
+            elif not JOIN_CODE_RE.fullmatch(existing_code["value"]):
+                self.db.execute("UPDATE settings SET value=? WHERE key='join_code'", (random_join_code(),))
+
             # 会场标识可公开，随数据库保留；入场码只用于 WebSocket 登记。
             self.db.execute("INSERT OR IGNORE INTO settings VALUES ('host_id', ?)", (secrets.token_hex(8),))
         settings = dict(self.db.execute("SELECT key, value FROM settings WHERE key IN ('host_id', 'join_code')"))
         self.join_code = settings["join_code"]
         self.host_id = settings["host_id"]
+
+    # ==================== 通用设置与参与名单辅助 ====================
+
+    def _get_setting(self, key: str, default: str | None = None) -> str | None:
+        row = self.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def _set_setting(self, key: str, value: str):
+        self.db.execute(
+            "INSERT INTO settings VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+    @staticmethod
+    def _parse_device_list(raw: str | None) -> list[str]:
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        if not isinstance(parsed, list):
+            return []
+        seen: set[str] = set()
+        out: list[str] = []
+        for item in parsed:
+            if isinstance(item, str) and DEVICE_ID_RE.fullmatch(item) and item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
+
+    @staticmethod
+    def _parse_mode_meta(raw: str | None) -> dict | None:
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _normalize_roster_mode(raw: object) -> str:
+        return raw if isinstance(raw, str) and raw in ROSTER_MODES else "all"
+
+    def is_device_eligible_for_batch(self, batch: sqlite3.Row, device: str) -> bool:
+        mode = self._normalize_roster_mode(batch["roster_mode"])
+        if mode == "all":
+            return True
+        listed = set(self._parse_device_list(batch["roster_devices"]))
+        if mode == "selected":
+            return device in listed
+        if device in listed:
+            return False
+        if not batch["roster_allow_late"] and batch["roster_eligible"] is not None:
+            return device in set(self._parse_device_list(batch["roster_eligible"]))
+        return True
+
+    @staticmethod
+    def format_roster_summary(
+        mode: str,
+        device_ids: list[str],
+        allow_late: bool,
+        eligible_snapshot: list[str] | None,
+    ) -> str:
+        if mode == "all":
+            return "全员参与"
+        if mode == "selected":
+            return f"仅选中 {len(device_ids)} 台参与"
+        if not allow_late and eligible_snapshot is not None:
+            if device_ids:
+                return f"排除 {len(device_ids)} 台 · 锁定 {len(eligible_snapshot)} 台参与"
+            return f"锁定 {len(eligible_snapshot)} 台参与"
+        return f"排除 {len(device_ids)} 台（其余参与）" if device_ids else "全员参与"
+
+    def get_roster_config(self) -> dict:
+        registered = {r["id"] for r in self.db.execute("SELECT id FROM devices")}
+        mode = self._normalize_roster_mode(self._get_setting("roster_mode", "all"))
+        device_ids = [d for d in self._parse_device_list(self._get_setting("roster_devices", "[]")) if d in registered]
+        allow_late_raw = self._get_setting("roster_allow_late", "1")
+        allow_late = True if mode == "all" else False if mode == "selected" else (allow_late_raw != "0")
+        excluded_see_results = self._get_setting("excluded_see_results", "1") != "0"
+        return {
+            "mode": mode,
+            "device_ids": [] if mode == "all" else device_ids,
+            "allow_late_join": allow_late,
+            "excluded_see_results": excluded_see_results,
+        }
+
+    def set_roster_config(self, data: dict):
+        if not isinstance(data, dict):
+            raise ValueError("参与设备配置格式无效")
+        with self._locked_poll() as (batch, _):
+            if batch and batch["phase"] != "published":
+                raise ApiError("本轮投票进行中，参与名单已锁定；请等待公布结果后再调整下一轮参与设备", 409)
+            current = self.get_roster_config()
+            mode = current["mode"]
+            if "mode" in data:
+                if not isinstance(data["mode"], str) or data["mode"] not in ROSTER_MODES:
+                    raise ValueError("参与设备模式无效")
+                mode = data["mode"]
+            registered = {r["id"] for r in self.db.execute("SELECT id FROM devices")}
+            device_ids = list(current["device_ids"])
+            if "device_ids" in data:
+                raw_ids = data["device_ids"]
+                if not isinstance(raw_ids, list):
+                    raise ValueError("设备列表格式无效")
+                seen: set[str] = set()
+                cleaned: list[str] = []
+                for item in raw_ids:
+                    if not isinstance(item, str) or not DEVICE_ID_RE.fullmatch(item):
+                        raise ValueError("包含无效的设备编号")
+                    if item not in registered:
+                        raise ValueError("列表中包含尚未登记或已移除的设备，请刷新后重试")
+                    if item not in seen:
+                        seen.add(item)
+                        cleaned.append(item)
+                device_ids = cleaned
+            elif mode == "all":
+                device_ids = []
+            if mode == "all":
+                device_ids = []
+
+            allow_late = current["allow_late_join"]
+            if "allow_late_join" in data:
+                if type(data["allow_late_join"]) is not bool:
+                    raise ValueError("中途加入选项格式无效")
+                allow_late = data["allow_late_join"]
+            if mode == "all":
+                allow_late = True
+            elif mode == "selected":
+                allow_late = False
+
+            excluded_see = current["excluded_see_results"]
+            if "excluded_see_results" in data:
+                if type(data["excluded_see_results"]) is not bool:
+                    raise ValueError("旁观结果选项格式无效")
+                excluded_see = data["excluded_see_results"]
+
+            self._set_setting("roster_mode", mode)
+            self._set_setting("roster_devices", json.dumps(device_ids))
+            self._set_setting("roster_allow_late", "1" if allow_late else "0")
+            self._set_setting("excluded_see_results", "1" if excluded_see else "0")
+
+    def build_active_roster_state(
+        self,
+        batch: sqlite3.Row,
+        all_device_ids: list[str],
+        online_set: set[str],
+    ) -> dict:
+        mode = self._normalize_roster_mode(batch["roster_mode"])
+        device_ids = self._parse_device_list(batch["roster_devices"])
+        allow_late = True if mode == "all" else False if mode == "selected" else bool(batch["roster_allow_late"])
+        excluded_see_results = batch["excluded_see_results"] != 0
+        eligible_snapshot = (
+            self._parse_device_list(batch["roster_eligible"])
+            if batch["roster_eligible"] is not None
+            else None
+        )
+
+        if mode == "selected" or (mode == "exclude" and not allow_late and eligible_snapshot is not None):
+            frozen = device_ids if mode == "selected" else (eligible_snapshot or [])
+            frozen_set = set(frozen)
+            eligible_total = len(frozen)
+            eligible_online = sum(1 for d in online_set if d in frozen_set)
+            excluded_count = sum(1 for d in all_device_ids if d not in frozen_set)
+        else:
+            eligible_total = 0
+            eligible_online = 0
+            excluded_count = 0
+            for d in all_device_ids:
+                if self.is_device_eligible_for_batch(batch, d):
+                    eligible_total += 1
+                    if d in online_set:
+                        eligible_online += 1
+                else:
+                    excluded_count += 1
+
+        return {
+            "mode": mode,
+            "locked": batch["phase"] != "published",
+            "device_ids": device_ids,
+            "allow_late_join": allow_late,
+            "excluded_see_results": excluded_see_results,
+            "eligible_total": eligible_total,
+            "eligible_online": eligible_online,
+            "excluded_count": excluded_count,
+            "summary": self.format_roster_summary(mode, device_ids, allow_late, eligible_snapshot),
+        }
+
+    # ==================== 入场码改码与踢出/移除设备 ====================
+
+    def rotate_join_code(self, raw_code: object = None) -> str:
+        if raw_code is None or raw_code == "":
+            next_code = random_join_code()
+            if next_code == self.join_code:
+                next_code = f"{(int(next_code) + 1) % 10000:04d}"
+        else:
+            if not isinstance(raw_code, str):
+                raise ValueError("请输入 4 位纯数字入场码")
+            cleaned = raw_code.strip()
+            if not JOIN_CODE_RE.fullmatch(cleaned):
+                raise ValueError("请输入 4 位纯数字入场码")
+            if cleaned == self.join_code:
+                return cleaned
+            next_code = cleaned
+
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            self._set_setting("join_code", next_code)
+            # 更换新入场码后，之前按旧码记录的移出拦截自动清空。
+            self.db.execute("DELETE FROM kicked_devices")
+        self.join_code = next_code
+        return next_code
+
+    def is_kicked(self, device: str) -> bool:
+        row = self.db.execute(
+            "SELECT kicked_code FROM kicked_devices WHERE device_id=?",
+            (device,),
+        ).fetchone()
+        if not row:
+            return False
+        if row["kicked_code"] == self.join_code:
+            return True
+        with self.db:
+            self.db.execute("DELETE FROM kicked_devices WHERE device_id=?", (device,))
+        return False
+
+    def remove_device(self, device: object, *, record_kick: bool):
+        if not isinstance(device, str) or not DEVICE_ID_RE.fullmatch(device):
+            raise ValueError("设备编号无效")
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            existed = self.db.execute("SELECT 1 FROM devices WHERE id=?", (device,)).fetchone()
+            if not existed and not record_kick:
+                raise ValueError("该设备尚未登记")
+            self.db.execute("DELETE FROM devices WHERE id=?", (device,))
+            mapping = self.aliases()
+            if device in mapping:
+                mapping.pop(device, None)
+                self._set_setting("device_aliases", json.dumps(mapping, ensure_ascii=False))
+            roster_ids = self._parse_device_list(self._get_setting("roster_devices", "[]"))
+            if device in roster_ids:
+                cleaned = [d for d in roster_ids if d != device]
+                self._set_setting("roster_devices", json.dumps(cleaned))
+            if record_kick:
+                self.db.execute(
+                    """INSERT INTO kicked_devices(device_id, kicked_code, kicked_at_ms)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(device_id) DO UPDATE SET
+                         kicked_code=excluded.kicked_code,
+                         kicked_at_ms=excluded.kicked_at_ms""",
+                    (device, self.join_code, clock_ms()),
+                )
+
+    # ==================== 自定义投票模式 ====================
+
+    @staticmethod
+    def _row_to_custom_mode(row: sqlite3.Row) -> dict:
+        fixed_options = None
+        if row["fixed_options"]:
+            try:
+                parsed = json.loads(row["fixed_options"])
+                if isinstance(parsed, list):
+                    fixed_options = [s for s in parsed if isinstance(s, str)]
+            except (TypeError, json.JSONDecodeError):
+                fixed_options = None
+        try:
+            rule = json.loads(row["rule_config"] or "{}")
+            if not isinstance(rule, dict):
+                rule = {}
+        except (TypeError, json.JSONDecodeError):
+            rule = {}
+        mode = {
+            "id": row["id"],
+            "name": row["name"],
+            "guide": row["guide"] or "",
+            "base_kind": row["base_kind"],
+            "fixed_options": fixed_options,
+            "updated_at_ms": row["updated_at_ms"],
+        }
+        if row["base_kind"] == "approval":
+            mode["yes_index"] = rule.get("yes_index", 0)
+            mode["abstain_index"] = rule.get("abstain_index", None)
+            mode["pass_pct"] = rule.get("pass_pct", 50)
+            mode["pass_op"] = "gte" if rule.get("pass_op") == "gte" else "gt"
+        elif row["base_kind"] == "rating":
+            mode["weights"] = [w for w in (rule.get("weights") or []) if _is_finite_number(w)]
+            mode["unit"] = rule.get("unit", "分") if isinstance(rule.get("unit"), str) else "分"
+        return mode
+
+    def list_custom_modes(self) -> list[dict]:
+        rows = self.db.execute("SELECT * FROM custom_modes ORDER BY updated_at_ms DESC, rowid DESC").fetchall()
+        return [self._row_to_custom_mode(r) for r in rows]
+
+    def get_custom_mode(self, mode_id: str) -> dict | None:
+        row = self.db.execute("SELECT * FROM custom_modes WHERE id=?", (mode_id,)).fetchone()
+        return self._row_to_custom_mode(row) if row else None
+
+    def save_custom_mode(self, data: dict) -> str:
+        parsed = parse_custom_mode_input(data)
+        raw_id = data.get("id")
+        mode_id: str | None = None
+        if raw_id not in (None, ""):
+            if not isinstance(raw_id, str) or not HEX16_RE.fullmatch(raw_id):
+                raise ValueError("自定义模式编号无效")
+            mode_id = raw_id
+
+        now = clock_ms()
+        fixed_json = json.dumps(parsed["fixed_options"], ensure_ascii=False) if parsed["fixed_options"] is not None else None
+        rule_json = json.dumps(parsed["rule_config"], ensure_ascii=False)
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            existing = self.db.execute("SELECT id, name FROM custom_modes").fetchall()
+            for row in existing:
+                if row["name"].lower() == parsed["name"].lower() and row["id"] != mode_id:
+                    raise ApiError(f"已存在名为「{parsed['name']}」的自定义模式，请换一个名称", 409)
+            if mode_id is not None:
+                if not any(row["id"] == mode_id for row in existing):
+                    raise ApiError("找不到要编辑的自定义模式，可能已被删除", 404)
+                self.db.execute(
+                    """UPDATE custom_modes
+                       SET name=?, guide=?, base_kind=?, fixed_options=?, rule_config=?, updated_at_ms=?
+                       WHERE id=?""",
+                    (parsed["name"], parsed["guide"], parsed["base_kind"], fixed_json, rule_json, now, mode_id),
+                )
+                return mode_id
+            if len(existing) >= MAX_CUSTOM_MODES:
+                raise ValueError(f"最多保存 {MAX_CUSTOM_MODES} 个自定义投票模式，请先删除不需要的模式")
+            next_id = secrets.token_hex(8)
+            self.db.execute(
+                """INSERT INTO custom_modes(id, name, guide, base_kind, fixed_options, rule_config, updated_at_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (next_id, parsed["name"], parsed["guide"], parsed["base_kind"], fixed_json, rule_json, now),
+            )
+            return next_id
+
+    def delete_custom_mode(self, raw_id: object):
+        if not isinstance(raw_id, str) or not HEX16_RE.fullmatch(raw_id):
+            raise ValueError("自定义模式编号无效")
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            deleted = self.db.execute("DELETE FROM custom_modes WHERE id=?", (raw_id,)).rowcount
+            if not deleted:
+                raise ApiError("找不到要删除的自定义模式", 404)
+
+    # ==================== 设备备注 ====================
 
     def aliases(self) -> dict[str, str]:
         row = self.db.execute("SELECT value FROM settings WHERE key='device_aliases'").fetchone()
@@ -197,7 +845,7 @@ class Store:
         return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
 
     def set_alias(self, device: object, alias: object) -> str:
-        if not isinstance(device, str) or not re.fullmatch(r"[0-9a-f]{12}", device):
+        if not isinstance(device, str) or not DEVICE_ID_RE.fullmatch(device):
             raise ValueError("设备编号无效")
         if not isinstance(alias, str):
             raise ValueError("设备备注必须是文字")
@@ -215,12 +863,10 @@ class Store:
                 mapping[device] = cleaned
             else:
                 mapping.pop(device, None)
-            self.db.execute(
-                "INSERT INTO settings VALUES ('device_aliases', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (json.dumps(mapping, ensure_ascii=False),),
-            )
+            self._set_setting("device_aliases", json.dumps(mapping, ensure_ascii=False))
         return cleaned
+
+    # ==================== 题库与投票核心 ====================
 
     def _latest(self):
         # 批次用首题编号标识，按插入顺序定位，避免电脑校时改变当前场次。
@@ -228,34 +874,39 @@ class Store:
 
     def library_questions(self) -> list[dict]:
         rows = self.db.execute("""
-            SELECT id,title,options,mode,correct_choice,revision FROM question_library ORDER BY updated_at_ms DESC,rowid DESC
+            SELECT id,title,options,mode,mode_meta,correct_choice,revision
+            FROM question_library ORDER BY updated_at_ms DESC,rowid DESC
         """)
         questions = []
         for row in rows:
             question = dict(row)
             question["options"] = json.loads(question["options"])
+            meta = self._parse_mode_meta(question.pop("mode_meta", None))
+            if meta is not None:
+                question["mode_meta"] = meta
             questions.append(question)
         return questions
 
     def save_library_question(self, data: dict):
         question_id = data.get("id")
         revision = data.get("revision")
-        if not isinstance(question_id, str) or not re.fullmatch(r"[0-9a-f]{16}", question_id):
+        if not isinstance(question_id, str) or not HEX16_RE.fullmatch(question_id):
             raise ValueError("题库编号无效")
         if revision is not None and (type(revision) is not int or revision < 1):
             raise ValueError("题库版本无效")
-        entry = read_question(data)
+        entry = read_question(data, self.get_custom_mode)
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             current = self.db.execute(
-                "SELECT title,options,mode,correct_choice,revision FROM question_library WHERE id=?", (question_id,)
+                "SELECT title,options,mode,mode_meta,correct_choice,revision FROM question_library WHERE id=?",
+                (question_id,),
             ).fetchone()
             if current is None:
                 if revision is not None:
                     raise ValueError("找不到这道题，请返回题库再试")
                 self.db.execute("""
-                    INSERT INTO question_library(id,title,options,mode,correct_choice,revision,updated_at_ms)
-                    VALUES (?,?,?,?,?,1,?)
+                    INSERT INTO question_library(id,title,options,mode,mode_meta,correct_choice,revision,updated_at_ms)
+                    VALUES (?,?,?,?,?,?,1,?)
                 """, (question_id, *entry, clock_ms()))
                 return
             if tuple(current)[:-1] == entry:
@@ -264,7 +915,8 @@ class Store:
             if revision != current["revision"]:
                 raise ValueError("题库里的这道题已有新版本，请返回题库重新打开")
             self.db.execute("""
-                UPDATE question_library SET title=?,options=?,mode=?,correct_choice=?,revision=revision+1,updated_at_ms=?
+                UPDATE question_library
+                SET title=?,options=?,mode=?,mode_meta=?,correct_choice=?,revision=revision+1,updated_at_ms=?
                 WHERE id=?
             """, (*entry, clock_ms(), question_id))
 
@@ -278,11 +930,21 @@ class Store:
         participants = self.db.execute("""
             SELECT COUNT(DISTINCT v.device_id) FROM votes v JOIN polls p ON p.id=v.poll_id WHERE p.batch_id=?
         """, (batch["id"],)).fetchone()[0]
+        mode = self._normalize_roster_mode(batch["roster_mode"])
+        roster_ids = self._parse_device_list(batch["roster_devices"])
+        allow_late = True if mode == "all" else False if mode == "selected" else bool(batch["roster_allow_late"])
+        eligible_snapshot = (
+            self._parse_device_list(batch["roster_eligible"])
+            if batch["roster_eligible"] is not None
+            else None
+        )
+        roster_summary = self.format_roster_summary(mode, roster_ids, allow_late, eligible_snapshot)
         self.db.execute("""
-            INSERT INTO poll_reports(batch_id,title,started_at_ms,ended_at_ms,question_count,participants,total_votes,questions)
-            VALUES (?,?,?,?,?,?,?,?)
+            INSERT INTO poll_reports(
+                batch_id,title,started_at_ms,ended_at_ms,question_count,participants,total_votes,roster_summary,questions
+            ) VALUES (?,?,?,?,?,?,?,?,?)
         """, (batch["id"], batch["title"], round(batch["created"] * 1000), ended_at_ms, len(questions),
-              participants, sum(q["total"] for q in questions), json.dumps(questions, ensure_ascii=False)))
+              participants, sum(q["total"] for q in questions), roster_summary, json.dumps(questions, ensure_ascii=False)))
 
     def _finish(self, poll, phase, ended_at_ms):
         # 截止和统计同事务提交。后续公布或重发原票都不改写这份统计。
@@ -292,16 +954,21 @@ class Store:
 
     def history(self, before=None):
         query = """SELECT rowid AS cursor, batch_id AS id, title, started_at_ms, ended_at_ms,
-                          question_count, participants, total_votes FROM poll_reports"""
+                          question_count, participants, total_votes, roster_summary FROM poll_reports"""
         params = ()
         if before is not None:
             query += " WHERE rowid < ?"
             params = (before,)
-        rows = [dict(row) for row in self.db.execute(query + " ORDER BY rowid DESC LIMIT 21", params)]
+        rows = []
+        for row in self.db.execute(query + " ORDER BY rowid DESC LIMIT 21", params):
+            item = dict(row)
+            if not item.get("roster_summary"):
+                item.pop("roster_summary", None)
+            rows.append(item)
         return dict(reports=rows[:20], next_before=rows[19]["cursor"] if len(rows) > 20 else None)
 
     def delete_report(self, batch_id: object):
-        if not isinstance(batch_id, str) or not re.fullmatch(r"[0-9a-f]{16}", batch_id):
+        if not isinstance(batch_id, str) or not HEX16_RE.fullmatch(batch_id):
             raise ValueError("投票记录编号无效")
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
@@ -314,11 +981,13 @@ class Store:
 
     def report(self, batch_id):
         row = self.db.execute("""SELECT batch_id AS id, title, started_at_ms, ended_at_ms,
-                question_count, participants, total_votes, questions FROM poll_reports WHERE batch_id=?""",
+                question_count, participants, total_votes, roster_summary, questions FROM poll_reports WHERE batch_id=?""",
                               (batch_id,)).fetchone()
         if row is None:
             return None
         report = dict(row)
+        if not report.get("roster_summary"):
+            report.pop("roster_summary", None)
         questions = json.loads(report["questions"])
         for question in questions:
             # 旧版归档保持原样，读取时按单选解释。
@@ -364,11 +1033,10 @@ class Store:
             registered = self.db.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
             if limit < registered:
                 raise ValueError(f"已有 {registered} 台设备登记，设备上限不能更低。可先移除离线设备")
-            self.db.execute("INSERT INTO settings VALUES ('device_limit', ?) "
-                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(limit),))
+            self._set_setting("device_limit", str(limit))
 
     def register(self, device: str):
-        if not re.fullmatch(r"[0-9a-f]{12}", device):
+        if not DEVICE_ID_RE.fullmatch(device):
             raise ValueError("设备编号无效")
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
@@ -392,7 +1060,7 @@ class Store:
         entries = []
         for i, question in enumerate(questions, 1):
             try:
-                entries.append(read_question(question))
+                entries.append(read_question(question, self.get_custom_mode))
             except ValueError as exc:
                 if len(questions) == 1:
                     raise
@@ -402,23 +1070,66 @@ class Store:
                 raise ValueError("请先公布当前投票的结果，再发起新题")
             if "previous_id" in data and data["previous_id"] != (poll["id"] if poll else None):
                 raise ValueError("当前投票已变更，请刷新后操作")
+
+            registered_ids = [r["id"] for r in self.db.execute("SELECT id FROM devices ORDER BY id")]
+            roster_cfg = self.get_roster_config()
+            roster_mode = roster_cfg["mode"]
+            raw_roster_ids = roster_cfg["device_ids"]
+            frozen_roster_devices = "[]"
+            frozen_allow_late = 1
+            frozen_eligible: str | None = None
+            frozen_excluded_see = 1 if roster_cfg["excluded_see_results"] else 0
+
+            if roster_mode == "selected":
+                if not raw_roster_ids:
+                    raise ValueError("当前为「选中参与」模式，请至少选中 1 台投票器后再发起投票")
+                frozen_roster_devices = json.dumps(raw_roster_ids)
+                frozen_allow_late = 0
+                frozen_eligible = json.dumps(raw_roster_ids)
+            elif roster_mode == "exclude":
+                frozen_roster_devices = json.dumps(raw_roster_ids)
+                frozen_allow_late = 1 if roster_cfg["allow_late_join"] else 0
+                if not frozen_allow_late:
+                    excluded_set = set(raw_roster_ids)
+                    remaining = [d for d in registered_ids if d not in excluded_set]
+                    if not remaining:
+                        raise ValueError("当前已排除全部设备且锁定名单，请取消排除至少 1 台或开启「允许中途新机加入」")
+                    frozen_eligible = json.dumps(remaining)
+
             deadline = read_deadline(data, now)
             batch_id = secrets.token_hex(8)
-            self.db.executemany(INSERT_OPEN_POLL,
-                ((batch_id if i == 0 else secrets.token_hex(8), *entry, now / 1000, deadline, batch_id)
-                 for i, entry in enumerate(entries)))
+            self.db.executemany(
+                INSERT_OPEN_POLL,
+                (
+                    (
+                        batch_id if i == 0 else secrets.token_hex(8),
+                        *entry,
+                        now / 1000,
+                        deadline,
+                        batch_id,
+                        roster_mode,
+                        frozen_roster_devices,
+                        frozen_allow_late,
+                        frozen_eligible,
+                        frozen_excluded_see,
+                    )
+                    for i, entry in enumerate(entries)
+                ),
+            )
 
     def append_question(self, data: dict):
-        entry = read_question(data)
+        entry = read_question(data, self.get_custom_mode)
         question_id = data.get("question_id")
-        if not isinstance(question_id, str) or not re.fullmatch(r"[0-9a-f]{16}", question_id):
+        if not isinstance(question_id, str) or not HEX16_RE.fullmatch(question_id):
             raise ValueError("追加题目的编号无效")
         with self._locked_poll() as (batch, now):
             if not batch or batch["id"] != data.get("batch_id"):
                 raise ValueError("场次已变更，请核对当前投票")
             # 浏览器为一次提交固定题号。重试复用原题，即使期间已截止或达到上限。
-            existing = self.db.execute("SELECT batch_id,title,options,mode,correct_choice FROM polls WHERE id=?",
-                                       (question_id,)).fetchone()
+            existing = self.db.execute(
+                "SELECT batch_id,title,options,mode,mode_meta,correct_choice FROM polls WHERE id=?",
+                (question_id,),
+            ).fetchone()
             if existing is not None:
                 if question_id != batch["id"] and tuple(existing) == (batch["id"], *entry):
                     return
@@ -428,7 +1139,21 @@ class Store:
             count = self.db.execute("SELECT COUNT(*) FROM polls WHERE batch_id=?", (batch["id"],)).fetchone()[0]
             if count >= MAX_BATCH_POLLS:
                 raise ValueError(f"本场已达到 {MAX_BATCH_POLLS} 题上限")
-            self.db.execute(INSERT_OPEN_POLL, (question_id, *entry, now / 1000, batch["deadline_at_ms"], batch["id"]))
+            self.db.execute(
+                INSERT_OPEN_POLL,
+                (
+                    question_id,
+                    *entry,
+                    now / 1000,
+                    batch["deadline_at_ms"],
+                    batch["id"],
+                    batch["roster_mode"],
+                    batch["roster_devices"],
+                    batch["roster_allow_late"],
+                    batch["roster_eligible"],
+                    batch["excluded_see_results"],
+                ),
+            )
 
     def change_deadline(self, data: dict):
         with self._locked_poll() as (poll, now):
@@ -465,8 +1190,10 @@ class Store:
             poll = None
             if batch and isinstance(poll_id, str):
                 poll = self.db.execute("SELECT * FROM polls WHERE batch_id=? AND id=?", (batch["id"], poll_id)).fetchone()
-            if not poll:
+            if not poll or not batch:
                 raise ValueError("题目已变更，本次提交未计票")
+            if not self.is_device_eligible_for_batch(batch, device):
+                raise ValueError("本轮未安排此设备参与，未计票")
             old = self.db.execute("SELECT choice FROM votes WHERE poll_id=? AND device_id=?",
                                   (poll_id, device)).fetchone()
             # 截止后可确认原票；首次落票用取得写锁时的主持电脑时间判定。
@@ -489,13 +1216,20 @@ class Store:
     def snapshot(self, device: str | None = None, viewed_id: str | None = None):
         now = clock_ms()
         batch = self.current(now)
-        state = {"v": 1, "type": "state", "poll": None}
+        state: dict = {"v": 1, "type": "state", "poll": None}
         if device is None:
             state["server_now_ms"] = now
         if not batch:
             return state
-        rows = self.db.execute("SELECT * FROM polls WHERE batch_id=? ORDER BY rowid", (batch["id"],)).fetchall()
         published = batch["phase"] == "published"
+        if device is not None:
+            eligible = self.is_device_eligible_for_batch(batch, device)
+            if not eligible:
+                if not published or batch["excluded_see_results"] == 0:
+                    state["standby_reason"] = "excluded"
+                    return state
+                state["standby_reason"] = "observer"
+        rows = self.db.execute("SELECT * FROM polls WHERE batch_id=? ORDER BY rowid", (batch["id"],)).fetchall()
         shown = None
         if published and len(rows) > 1:
             setting = self.db.execute("SELECT value FROM settings WHERE key='shown_result'").fetchone()
@@ -513,20 +1247,27 @@ class Store:
             result_id = viewed_id if viewed_id in ids else shown
             index = ids.index(result_id) if result_id else 0
         else:
-            index = next((i for i, pid in enumerate(ids) if pid not in mine), len(rows)-1)
+            index = next((i for i, pid in enumerate(ids) if pid not in mine), len(rows) - 1)
         poll = rows[index]
         item = self._poll_item(poll, now, mine.get(poll["id"], -1), published)
         if len(rows) > 1:
-            item["batch"] = {"index": index+1, "count": len(rows), "answered": len(mine)}
+            item["batch"] = {"index": index + 1, "count": len(rows), "answered": len(mine)}
             if published:
-                item["batch"].update(next=ids[(index+1) % len(rows)], prev=ids[index-1])
+                item["batch"].update(next=ids[(index + 1) % len(rows)], prev=ids[index - 1])
         state["poll"] = item
         return state
 
-    @staticmethod
-    def _mode_fields(poll, counts):
+    def _mode_fields(self, poll, counts):
         mode, correct_choice = poll["mode"], poll["correct_choice"]
-        return dict(mode=mode, correct_choice=correct_choice, mode_summary=mode_summary(mode, correct_choice, counts))
+        mode_meta = self._parse_mode_meta(poll["mode_meta"])
+        fields = dict(
+            mode=mode,
+            correct_choice=correct_choice,
+            mode_summary=mode_summary(mode, correct_choice, counts, mode_meta),
+        )
+        if mode_meta is not None:
+            fields["mode_meta"] = mode_meta
+        return fields
 
     def _poll_item(self, poll, now, choice, show_counts, *, host=False):
         options = json.loads(poll["options"])
@@ -545,7 +1286,8 @@ class Store:
     def _counts(self, poll_id, option_count):
         counts = [0] * option_count
         for choice, total in self.db.execute("SELECT choice,COUNT(*) FROM votes WHERE poll_id=? GROUP BY choice", (poll_id,)):
-            counts[choice] = total
+            if 0 <= choice < option_count:
+                counts[choice] = total
         return counts
 
 
@@ -561,30 +1303,45 @@ def report_csv(report):
     writer = csv.writer(out)
     writer.writerow(["发起时间（北京时间）", "结束时间（北京时间）", "参与人数", "整场票数",
                      "题号", "题目", "本题票数", "选项编号", "选项", "选项票数", "得票比例",
-                     "投票模式", "正确选项", "模式统计"])
+                     "投票模式", "正确选项", "模式统计", "参与范围"])
     shared = [beijing(report["started_at_ms"]), beijing(report["ended_at_ms"]), report["participants"], report["total_votes"]]
+    roster_label = report.get("roster_summary") or "全员参与"
     for number, question in enumerate(report["questions"], 1):
         total = question["total"]
         mode = question["mode"]
+        mode_meta = question.get("mode_meta")
         correct_choice = question["correct_choice"]
         summary = question["mode_summary"]
         answer = chr(65 + correct_choice) if correct_choice is not None else ""
         stats = ""
         if mode == "approval":
             stats = "无有效表决票"
-            if summary["approval_pct"] is not None:
+            if summary.get("approval_pct") is not None:
                 outcome = "通过" if summary["passed"] else "未通过"
-                stats = f'{outcome} · 赞成率 {summary["approval_pct"]:.1f}%（不计弃权）'
+                abstain_note = "" if summary.get("has_abstain") is False else "（不计弃权）"
+                threshold_note = ""
+                if summary.get("pass_pct") is not None:
+                    op_sym = "≥" if summary.get("pass_op") == "gte" else ">"
+                    threshold_note = f' · 阈值 {op_sym}{summary["pass_pct"]}%'
+                stats = f'{outcome} · 赞成率 {summary["approval_pct"]:.1f}%{abstain_note}{threshold_note}'
         elif mode == "rating":
-            average = summary["average"]
-            stats = f"平均 {average:.2f} 分" if average is not None else "暂无评分"
+            average = summary.get("average")
+            unit = summary.get("unit", "分")
+            suffix = f" {unit}" if unit else ""
+            if average is None:
+                stats = "暂无评分"
+            else:
+                total_score = summary.get("total_score")
+                total_part = f" · 总计 {total_score}{suffix}" if total_score is not None else ""
+                stats = f"平均 {average:.2f}{suffix}{total_part}"
         elif mode == "quiz":
-            percent = summary["correct_pct"]
+            percent = summary.get("correct_pct")
             stats = f'答对 {summary["correct_count"]} 人 · 正确率 {percent:.1f}%' if percent is not None else "暂无作答"
-        extra = [MODE_LABELS[mode], answer, stats]
+        mode_label = (mode_meta or {}).get("name") or MODE_LABELS[mode]
+        extra = [mode_label, answer, stats, roster_label]
         for i, (option, count) in enumerate(zip(question["options"], question["counts"])):
             percent = 100 * count / total if total else 0
-            writer.writerow([*shared, number, cell(question["title"]), total, chr(65+i), cell(option), count,
+            writer.writerow([*shared, number, cell(question["title"]), total, chr(65 + i), cell(option), count,
                              f"{percent:.1f}%", *extra])
     return out.getvalue().encode("utf-8-sig")
 
@@ -668,11 +1425,35 @@ class VotingService:
             await ws.close()
             return False
 
-    async def broadcast(self):
+    async def broadcast(self) -> tuple[int, int]:
         # 单次广播读取最新快照；串行发送，避免截止/公布与落票快照乱序。
         async with self.broadcast_lock:
-            sent = await asyncio.gather(*(self.send_state(d, w) for d, w in list(self.clients.items())))
-            return sum(sent)
+            items = list(self.clients.items())
+            batch = self.store.current()
+            results = await asyncio.gather(*(self.send_state(d, w) for d, w in items))
+            total_sent = sum(1 for ok in results if ok)
+            eligible_sent = sum(
+                1
+                for (d, _), ok in zip(items, results)
+                if ok and (batch is None or self.store.is_device_eligible_for_batch(batch, d))
+            )
+            return total_sent, eligible_sent
+
+    async def kick_device(self, device: object):
+        if not isinstance(device, str) or not DEVICE_ID_RE.fullmatch(device):
+            raise ValueError("设备编号无效")
+        ws = self.clients.get(device)
+        registered = self.store.db.execute("SELECT 1 FROM devices WHERE id=?", (device,)).fetchone()
+        if ws is None and not registered:
+            raise ValueError("该设备不在当前会场中")
+        self.store.remove_device(device, record_kick=True)
+        if ws is not None:
+            self.clients.pop(device, None)
+            self.viewed.pop(device, None)
+            with suppress(Exception):
+                if not ws.closed:
+                    await ws.send_json({"v": 1, "type": "error", "message": "已被移出会场，长按确定可换码"})
+                    await ws.close(code=1008, message=b"kicked")
 
     async def ws_device(self, request: web.Request):
         ws = web.WebSocketResponse(heartbeat=15, max_msg_size=MAX_MESSAGE, compress=False)
@@ -694,8 +1475,10 @@ class VotingService:
                 if not isinstance(code, str) or not code.isascii() or not secrets.compare_digest(code, self.store.join_code):
                     raise ValueError("入场码错误，长按确定可切换")
             candidate = data.get("device_id", "")
-            if not isinstance(candidate, str):
+            if not isinstance(candidate, str) or not DEVICE_ID_RE.fullmatch(candidate):
                 raise ValueError("设备编号无效")
+            if self.store.is_kicked(candidate):
+                raise ValueError("已被移出会场，长按确定可换码")
             if candidate in self.clients and not self.clients[candidate].closed:
                 raise ValueError("设备仍有旧连接，请稍后重连")
             self.store.register(candidate)
@@ -723,12 +1506,14 @@ class VotingService:
                         await self.send_state(device, ws)
                     elif data.get("type") == "view":
                         requested = data.get("poll_id")
-                        if not isinstance(requested, str) or not re.fullmatch(r"[0-9a-f]{16}", requested):
+                        if not isinstance(requested, str) or not HEX16_RE.fullmatch(requested):
                             raise ValueError("题目编号无效")
                         batch = self.store.current()
                         if not batch or batch["phase"] != "published" or not self.store.db.execute(
                                 "SELECT 1 FROM polls WHERE id=? AND batch_id=?", (requested, batch["id"])).fetchone():
                             raise ValueError("请等待主持人公布本组结果")
+                        if not self.store.is_device_eligible_for_batch(batch, device) and batch["excluded_see_results"] == 0:
+                            raise ValueError("本轮未安排此设备查看结果")
                         self.viewed[device] = requested
                         await self.send_state(device, ws)
                     elif data.get("type") == "sync":
@@ -770,23 +1555,72 @@ class VotingService:
         latest_report = self.store.db.execute("SELECT batch_id FROM poll_reports ORDER BY rowid DESC LIMIT 1").fetchone()
         history_count = self.store.db.execute("SELECT COUNT(*) FROM poll_reports").fetchone()[0]
         state["latest_report"] = latest_report[0] if latest_report else None
-        state.update(join_code=self.store.join_code, nonce=self.admin_nonce, max_devices=self.store.device_limit(),
-                     device_limit_max=MAX_DEVICE_LIMIT,
-                     addresses=self.addresses, port=self.port, host_id=self.store.host_id,
-                     discovery_available=self.discovery is not None, max_batch_polls=MAX_BATCH_POLLS,
-                     supports_append=True, supports_modes=True, supports_question_library=True,
-                     supports_history_delete=True, supports_open_join=True,
-                     open_join_remaining_ms=self.open_join_remaining_ms(),
-                     open_join_until_ms=self.open_join_until_ms if self.open_join_active() else None,
-                     history_count=history_count)
+        batch = self.store.current()
+        device_rows = self.store.db.execute("SELECT * FROM devices ORDER BY id").fetchall()
+        all_device_ids = [r["id"] for r in device_rows]
+        online_set = set(self.clients.keys())
+        roster = self.store.get_roster_config()
+        roster_set = set(roster["device_ids"])
+        active_roster = (
+            self.store.build_active_roster_state(batch, all_device_ids, online_set)
+            if batch is not None
+            else None
+        )
+        is_round_locked = batch is not None and batch["phase"] != "published"
+
+        state.update(
+            join_code=self.store.join_code,
+            nonce=self.admin_nonce,
+            max_devices=self.store.device_limit(),
+            device_limit_max=MAX_DEVICE_LIMIT,
+            addresses=self.addresses,
+            port=self.port,
+            host_id=self.store.host_id,
+            discovery_available=self.discovery is not None,
+            max_batch_polls=MAX_BATCH_POLLS,
+            supports_append=True,
+            supports_modes=True,
+            supports_question_library=True,
+            supports_history_delete=True,
+            supports_open_join=True,
+            supports_rotate_join_code=True,
+            supports_kick=True,
+            supports_roster=True,
+            supports_custom_modes=True,
+            open_join_remaining_ms=self.open_join_remaining_ms(),
+            open_join_until_ms=self.open_join_until_ms if self.open_join_active() else None,
+            history_count=history_count,
+            roster=roster,
+            active_roster=active_roster,
+            custom_modes=self.store.list_custom_modes(),
+        )
         current_id = state["poll"]["id"] if state["poll"] else ""
         answered = dict(self.store.db.execute("SELECT v.device_id, COUNT(*) FROM votes v JOIN polls p ON p.id=v.poll_id "
                                                "WHERE p.batch_id=? GROUP BY v.device_id", (current_id,)))
         question_count = len(state["batch"]["polls"]) if "batch" in state else 1
         aliases = self.store.aliases()
-        state["devices"] = [dict(id=r["id"], online=r["id"] in self.clients, answered=answered.get(r["id"], 0),
-                                 voted=answered.get(r["id"], 0) == question_count, alias=aliases.get(r["id"], ""))
-                            for r in self.store.db.execute("SELECT * FROM devices ORDER BY id")]
+        devices = []
+        for r in device_rows:
+            dev_id = r["id"]
+            active_eligible = self.store.is_device_eligible_for_batch(batch, dev_id) if batch is not None else None
+            if roster["mode"] == "all":
+                next_eligible = True
+            elif roster["mode"] == "selected":
+                next_eligible = dev_id in roster_set
+            else:
+                next_eligible = dev_id not in roster_set
+            devices.append(
+                dict(
+                    id=dev_id,
+                    online=dev_id in online_set,
+                    answered=answered.get(dev_id, 0),
+                    voted=answered.get(dev_id, 0) == question_count,
+                    alias=aliases.get(dev_id, ""),
+                    eligible=bool(active_eligible) if is_round_locked else next_eligible,
+                    active_eligible=active_eligible,
+                )
+            )
+        state["devices"] = devices
         return web.json_response(state)
 
     async def history_index(self, request):
@@ -820,6 +1654,7 @@ class VotingService:
             if not isinstance(data, dict):
                 raise ValueError("请求格式无效")
             action = request.match_info["action"]
+            extra: dict = {}
             if action == "create":
                 self.store.create(data)
             elif action == "create_batch":
@@ -837,16 +1672,25 @@ class VotingService:
                 self.viewed.clear()
             elif action == "forget":
                 device = data.get("device_id")
-                if not isinstance(device, str):
+                if not isinstance(device, str) or not DEVICE_ID_RE.fullmatch(device):
                     raise ValueError("设备编号无效")
                 if device in self.clients:
-                    raise ValueError("请先断开该设备")
-                with self.store.db:
-                    self.store.db.execute("DELETE FROM devices WHERE id=?", (device,))
+                    raise ValueError("请先断开该设备，或直接使用踢出设备")
+                self.store.remove_device(device, record_kick=False)
+            elif action == "kick":
+                await self.kick_device(data.get("device_id"))
             elif action == "alias":
                 self.store.set_alias(data.get("device_id"), data.get("alias", ""))
             elif action == "device_limit":
                 self.store.set_device_limit(data.get("limit"))
+            elif action == "roster_config":
+                self.store.set_roster_config(data)
+            elif action == "custom_mode_save":
+                extra["mode_id"] = self.store.save_custom_mode(data)
+            elif action == "custom_mode_delete":
+                self.store.delete_custom_mode(data.get("id"))
+            elif action == "rotate_join_code":
+                extra["join_code"] = self.store.rotate_join_code(data.get("code"))
             elif action == "library_save":
                 self.store.save_library_question(data)
             elif action == "history_delete":
@@ -857,12 +1701,26 @@ class VotingService:
                 raise ValueError("操作无效")
             if action in ("create", "create_batch", "deadline", "close", "publish"):
                 self.deadline_changed.set()
-            if action in ("alias", "device_limit", "library_save", "history_delete", "open_join"):
-                return web.json_response({"ok": True})
-            sent = await self.broadcast()
+            if action in (
+                "alias",
+                "device_limit",
+                "roster_config",
+                "custom_mode_save",
+                "custom_mode_delete",
+                "rotate_join_code",
+                "kick",
+                "forget",
+                "library_save",
+                "history_delete",
+                "open_join",
+            ):
+                return web.json_response({"ok": True, **extra})
+            _, eligible_sent = await self.broadcast()
             if action in ("create", "create_batch", "append_question"):
-                return web.json_response({"ok": True, "pushed_to": sent})
+                return web.json_response({"ok": True, "pushed_to": eligible_sent})
             return web.json_response({"ok": True})
+        except ApiError as exc:
+            return web.json_response({"error": str(exc)}, status=exc.status)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except sqlite3.Error:

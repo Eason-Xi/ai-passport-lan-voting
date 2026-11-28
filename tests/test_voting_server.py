@@ -292,6 +292,7 @@ class StoreTest(unittest.TestCase):
             INSERT INTO settings VALUES ('join_code', '001234'), ('host_id', '0123456789abcdef');
         """)
         db.close()
+        migrated_code = None
         for _ in range(2):
             store = Store(path)
             try:
@@ -300,7 +301,12 @@ class StoreTest(unittest.TestCase):
                 self.assertNotIn("deadline_at_ms", poll)
                 migrated = store.snapshot()["poll"]
                 self.assertEqual((migrated["mode"], migrated["correct_choice"], migrated["counts"]), ("single", None, [1, 0]))
-                self.assertEqual((store.join_code, store.host_id), ("001234", "0123456789abcdef"))
+                self.assertEqual(store.host_id, "0123456789abcdef")
+                self.assertRegex(store.join_code, r"^\d{4}$")
+                if migrated_code is None:
+                    migrated_code = store.join_code
+                else:
+                    self.assertEqual(store.join_code, migrated_code)
             finally:
                 store.db.close()
 
@@ -435,12 +441,13 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_maximum_batch_fits_single_device_frame(self):
         ws, _ = await self.connect(0)
-        question = dict(title="题" * 60, options=[str(i) + "字" * 23 for i in range(6)])
+        question = dict(title="题" * 60, options=[str(i) + "字" * 23 for i in range(10)])
         await self.action("create_batch", {"questions": [question] * MAX_BATCH_POLLS})
         packet = await ws.receive_str(timeout=3)
-        self.assertLess(len(packet.encode()), 2048)
+        self.assertLess(len(packet.encode()), 2560)
         state = json.loads(packet)
         self.assertEqual(state["poll"]["batch"], {"index": 1, "count": MAX_BATCH_POLLS, "answered": 0})
+        self.assertEqual(len(state["poll"]["options"]), 10)
         self.assertNotIn("batch", state)
         self.assertEqual(len(self.service.store.snapshot()["batch"]["polls"]), MAX_BATCH_POLLS)
 
@@ -468,8 +475,8 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
             rows = list(csv.reader(io.StringIO((await response.read()).decode("utf-8-sig"))))
         self.assertEqual(rows[1][5:11], ["'=选择","1","A","甲,乙","0","0.0%"])
         self.assertEqual(rows[2][5:11], ["'=选择","1","B","'@是","1","100.0%"])
-        self.assertEqual(rows[0][11:], ["投票模式", "正确选项", "模式统计"])
-        self.assertEqual(rows[1][11:], ["普通单选", "", ""])
+        self.assertEqual(rows[0][11:], ["投票模式", "正确选项", "模式统计", "参与范围"])
+        self.assertEqual(rows[1][11:], ["普通单选", "", "", "全员参与"])
         for path in ("/api/history", "/api/history/"+poll_id, "/api/history/"+poll_id+"/csv"):
             async with self.session.get(self.base+path, headers={"Host":"untrusted.example"}) as response:
                 self.assertEqual(response.status, 403)
@@ -953,6 +960,275 @@ class NetworkTest(unittest.IsolatedAsyncioTestCase):
         await ws_after.send_json(dict(v=1, type="hello", device_id="aabbcc000003", open_join=True))
         denied = await ws_after.receive_json(timeout=3)
         self.assertEqual(denied["type"], "error")
+
+    async def test_four_digit_code_rotate_and_kick_device(self):
+        old_code = self.service.store.join_code
+        self.assertRegex(old_code, r"^\d{4}$")
+        ws0, _ = await self.connect(0)
+        await self.action("alias", dict(device_id="aabbcc000000", alias="1号机"))
+        await self.action("roster_config", dict(mode="selected", device_ids=["aabbcc000000"]))
+
+        # 自定义改码校验与成功设置
+        for bad_code in ("123", "12345", "123456", "12ab", 1234):
+            async with self.session.post(
+                self.base + "/api/rotate_join_code",
+                json={"code": bad_code},
+                headers={"X-Host-Nonce": self.service.admin_nonce},
+            ) as response:
+                self.assertEqual(response.status, 400)
+
+        custom_code = "8899" if old_code != "8899" else "6677"
+        res = await self.action("rotate_join_code", {"code": custom_code})
+        self.assertEqual(res["join_code"], custom_code)
+        self.assertEqual(self.service.store.join_code, custom_code)
+
+        # 踢出在线设备：立即断开、清除登记/备注/预选名单，拦截原码和一键入场重连
+        await self.action("kick", dict(device_id="aabbcc000000"))
+        kicked_msg = await ws0.receive_json(timeout=3)
+        self.assertEqual(kicked_msg["type"], "error")
+        self.assertIn("移出", kicked_msg["message"])
+        async with self.session.get(self.base + "/api/state") as response:
+            state = await response.json()
+            self.assertEqual(state["devices"], [])
+            self.assertEqual(state["roster"]["device_ids"], [])
+            self.assertTrue(state["supports_kick"])
+            self.assertTrue(state["supports_rotate_join_code"])
+
+        _, blocked = await self.connect(0, custom_code)
+        self.assertEqual(blocked["type"], "error")
+        self.assertIn("移出", blocked["message"])
+
+        await self.action("open_join", {"seconds": 60})
+        ws_open = await self.session.ws_connect(self.base.replace("http", "ws") + "/ws")
+        self.sockets.append(ws_open)
+        await ws_open.send_json(dict(v=1, type="hello", device_id="aabbcc000000", open_join=True))
+        blocked_open = await ws_open.receive_json(timeout=3)
+        self.assertEqual(blocked_open["type"], "error")
+        self.assertIn("移出", blocked_open["message"])
+
+        # 随机更换新入场码后自动解封，可凭新码重新加入
+        rotated = await self.action("rotate_join_code", {})
+        new_code = rotated["join_code"]
+        self.assertRegex(new_code, r"^\d{4}$")
+        self.assertNotEqual(new_code, custom_code)
+        _, rejoined = await self.connect(0, new_code)
+        self.assertEqual(rejoined["type"], "state")
+
+    async def test_roster_selection_exclusion_lock_and_observer_results(self):
+        ws0, _ = await self.connect(0)
+        ws1, _ = await self.connect(1)
+        ws2, _ = await self.connect(2)
+
+        # 选中参与未选设备禁止发起
+        await self.action("roster_config", dict(mode="selected", device_ids=[], excluded_see_results=False))
+        async with self.session.post(
+            self.base + "/api/create",
+            json=dict(title="空名单", options=["甲", "乙"]),
+            headers={"X-Host-Nonce": self.service.admin_nonce},
+        ) as response:
+            self.assertEqual(response.status, 400)
+
+        # 选中 0 号、1 号参与，2 号旁观且公布后也不可看结果
+        await self.action(
+            "roster_config",
+            dict(mode="selected", device_ids=["aabbcc000000", "aabbcc000001"], excluded_see_results=False),
+        )
+        started = await self.action("create", dict(title="评委表决", options=["通过", "退回"]))
+        self.assertEqual(started["pushed_to"], 2)
+        p0 = await self.receive_until(ws0, lambda d: d["type"] == "state" and d["poll"] is not None)
+        p1 = await self.receive_until(ws1, lambda d: d["type"] == "state" and d["poll"] is not None)
+        p2 = await self.receive_until(ws2, lambda d: d["type"] == "state" and d.get("standby_reason") == "excluded")
+        self.assertIsNone(p2["poll"])
+        poll_id = p0["poll"]["id"]
+        self.assertEqual(p1["poll"]["id"], poll_id)
+
+        # 发题后锁定名单，修改返 409
+        async with self.session.post(
+            self.base + "/api/roster_config",
+            json=dict(mode="all", device_ids=[]),
+            headers={"X-Host-Nonce": self.service.admin_nonce},
+        ) as response:
+            self.assertEqual(response.status, 409)
+
+        # 旁观机强行投票被拒绝，中途新机加入也旁观
+        await ws2.send_json(dict(v=1, type="vote", poll_id=poll_id, choice=0))
+        err2 = await self.receive_until(ws2, lambda d: d["type"] == "error")
+        self.assertIn("未安排此设备参与", err2["message"])
+        ws3, s3 = await self.connect(3)
+        self.assertIsNone(s3["poll"])
+        self.assertEqual(s3["standby_reason"], "excluded")
+
+        # 追加题目继承本轮锁定名单
+        await ws0.send_json(dict(v=1, type="vote", poll_id=poll_id, choice=0))
+        await self.receive_until(ws0, lambda d: d["poll"]["my_choice"] == 0)
+        appended = await self.action(
+            "append_question",
+            dict(batch_id=poll_id, question_id="a000000000000099", title="补充意见", options=["是", "否"]),
+        )
+        self.assertEqual(appended["pushed_to"], 2)
+        await self.receive_until(ws0, lambda d: d["poll"]["id"] == "a000000000000099")
+        await ws3.send_json(dict(v=1, type="sync"))
+        sync3 = await self.receive_until(ws3, lambda d: d["type"] == "state")
+        self.assertIsNone(sync3["poll"])
+
+        # 截止阶段仍然锁定 409
+        await self.action("close", dict(poll_id=poll_id))
+        async with self.session.post(
+            self.base + "/api/roster_config",
+            json=dict(mode="all", device_ids=[]),
+            headers={"X-Host-Nonce": self.service.admin_nonce},
+        ) as response:
+            self.assertEqual(response.status, 409)
+
+        # 公布结果：由于 excluded_see_results=False，旁观机仍待命；公布后可解锁改下一轮
+        await self.action("publish", dict(poll_id=poll_id))
+        pub0 = await self.receive_until(ws0, lambda d: d["poll"] and d["poll"]["phase"] == "published")
+        self.assertEqual(pub0["poll"]["counts"], [1, 0])
+        await ws2.send_json(dict(v=1, type="sync"))
+        sync2 = await self.receive_until(ws2, lambda d: d["type"] == "state")
+        self.assertIsNone(sync2["poll"])
+
+        # 验证 CSV 与历史记录包含参与范围
+        async with self.session.get(self.base + f"/api/history/{poll_id}/csv") as response:
+            rows = list(csv.DictReader(io.StringIO((await response.read()).decode("utf-8-sig"))))
+        self.assertIn("仅选中 2 台", rows[0]["参与范围"])
+
+        # 下一轮切「排除指定」+ excluded_see_results=True，验证旁观机公布后可见结果、中途新机自动加入
+        await self.action(
+            "roster_config",
+            dict(mode="exclude", device_ids=["aabbcc000002"], allow_late_join=True, excluded_see_results=True),
+        )
+        started2 = await self.action("create", dict(title="全员复议", options=["赞成", "反对"]))
+        self.assertEqual(started2["pushed_to"], 3)
+        p2_excluded = await self.receive_until(ws2, lambda d: d["type"] == "state" and d.get("standby_reason") == "excluded")
+        self.assertIsNone(p2_excluded["poll"])
+        ws4, s4 = await self.connect(4)
+        self.assertEqual(s4["poll"]["title"], "全员复议")
+        await ws4.send_json(dict(v=1, type="vote", poll_id=s4["poll"]["id"], choice=1))
+        await self.receive_until(ws4, lambda d: d["poll"]["my_choice"] == 1)
+        await self.action("publish", dict(poll_id=s4["poll"]["id"]))
+        pub2 = await self.receive_until(ws2, lambda d: d["poll"] and d["poll"]["phase"] == "published")
+        self.assertEqual(pub2["standby_reason"], "observer")
+        self.assertEqual(pub2["poll"]["counts"], [0, 1])
+
+    async def test_custom_modes_ten_options_and_frozen_snapshots(self):
+        ws0, _ = await self.connect(0)
+        ws1, _ = await self.connect(1)
+        ws2, _ = await self.connect(2)
+
+        # 1. 创建自定义 2/3 通过线表决、10 项加权评分、预设是非测验
+        m_app = await self.action(
+            "custom_mode_save",
+            dict(
+                name="2/3 多数表决",
+                base_kind="approval",
+                fixed_options=["同意", "反对", "弃权"],
+                yes_index=0,
+                abstain_index=2,
+                pass_op="gte",
+                pass_pct=66.6,
+            ),
+        )
+        m_rate = await self.action(
+            "custom_mode_save",
+            dict(
+                name="十分制打分",
+                base_kind="rating",
+                fixed_options=[f"{i} 分" for i in range(1, 11)],
+                weights=[float(i) for i in range(1, 11)],
+                unit="分",
+            ),
+        )
+        m_quiz = await self.action(
+            "custom_mode_save",
+            dict(
+                name="是非判断",
+                base_kind="quiz",
+                fixed_options=["正确", "错误"],
+            ),
+        )
+
+        # 11 项选项被拒绝
+        async with self.session.post(
+            self.base + "/api/create",
+            json=dict(title="超限选项", options=[f"项{i}" for i in range(11)]),
+            headers={"X-Host-Nonce": self.service.admin_nonce},
+        ) as response:
+            self.assertEqual(response.status, 400)
+
+        # 保存到题库以验证后续删除原模式时题库快照不失真
+        await self.action(
+            "library_save",
+            dict(id="a000000000000088", title="十项题库题", mode="rating", custom_mode_id=m_rate["mode_id"]),
+        )
+
+        # 批量发题（含自定义表决 + 10 项自定义加权评分 + 是非测验）
+        await self.action(
+            "create_batch",
+            dict(
+                questions=[
+                    dict(title="章程修订", mode="approval", custom_mode_id=m_app["mode_id"]),
+                    dict(title="演示打分", mode="rating", custom_mode_id=m_rate["mode_id"]),
+                    dict(title="支持十项", mode="quiz", custom_mode_id=m_quiz["mode_id"], correct_choice=0),
+                ]
+            ),
+        )
+        async with self.session.get(self.base + "/api/state") as response:
+            live = await response.json()
+        self.assertTrue(live["supports_custom_modes"])
+        polls = live["batch"]["polls"]
+        self.assertEqual(len(polls[1]["options"]), 10)
+
+        wire = []
+        # 3 台设备作答：表决 2 同意 1 反对（66.7% 达到 ≥66.7% 通过）；打分 10/8/6 分（均分 8.0，总分 24）；测验 2 对 1 错
+        ballots = [(0, 9, 0), (0, 7, 0), (1, 5, 1)]
+        for ws, b in zip((ws0, ws1, ws2), ballots):
+            for q, choice in zip(polls, b):
+                pkt = await self.receive_until(ws, lambda m: m["type"] == "state" and m["poll"]["id"] == q["id"])
+                if ws is ws0:
+                    wire.append(pkt)
+                await ws.send_json(dict(v=1, type="vote", poll_id=q["id"], choice=choice))
+            await self.receive_until(ws, lambda m: m["poll"]["batch"]["answered"] == 3)
+
+        anchor = polls[0]["id"]
+        await self.action("publish", dict(poll_id=anchor))
+        await self.action("show_result", dict(batch_id=anchor, poll_id=polls[1]["id"]))
+        pub10 = await self.receive_until(ws0, lambda m: m["poll"]["id"] == polls[1]["id"] and m["poll"]["phase"] == "published")
+        self.assertEqual(len(pub10["poll"]["counts"]), 10)
+        self.assertEqual(pub10["poll"]["counts"][9], 1)
+        self.assertEqual(pub10["poll"]["total"], 3)
+        wire.append(pub10)
+
+        # 删除全部自定义模式后，历史与题库中的冻结快照必须完整不失真
+        for mid in (m_app["mode_id"], m_rate["mode_id"], m_quiz["mode_id"]):
+            await self.action("custom_mode_delete", dict(id=mid))
+
+        async with self.session.get(self.base + f"/api/history/{anchor}") as response:
+            report = await response.json()
+        q_app, q_rate, q_quiz = report["questions"]
+        self.assertEqual(q_app["mode_meta"]["name"], "2/3 多数表决")
+        self.assertTrue(q_app["mode_summary"]["passed"])
+        self.assertEqual(q_rate["mode_meta"]["name"], "十分制打分")
+        self.assertEqual(q_rate["mode_summary"]["average"], 8.0)
+        self.assertEqual(q_rate["mode_summary"]["total_score"], 24)
+        self.assertEqual(q_quiz["mode_meta"]["name"], "是非判断")
+        self.assertEqual(q_quiz["mode_summary"]["correct_count"], 2)
+
+        async with self.session.get(self.base + f"/api/history/{anchor}/csv") as response:
+            rows = list(csv.DictReader(io.StringIO((await response.read()).decode("utf-8-sig"))))
+        by_title = {r["题目"]: r for r in rows if r["选项编号"] == "A"}
+        self.assertEqual(by_title["章程修订"]["投票模式"], "2/3 多数表决")
+        self.assertEqual(by_title["演示打分"]["投票模式"], "十分制打分")
+        self.assertIn("8.00", by_title["演示打分"]["模式统计"])
+
+        async with self.session.get(self.base + "/api/question_library") as response:
+            [lib_q] = (await response.json())["questions"]
+        self.assertEqual(lib_q["mode_meta"]["name"], "十分制打分")
+        self.assertEqual(len(lib_q["options"]), 10)
+
+        out = Path(__file__).resolve().parents[1] / "build" / "vote-ten-options-wire.jsonl"
+        out.parent.mkdir(exist_ok=True)
+        out.write_text("".join(json.dumps(p, ensure_ascii=False, separators=(",", ":")) + "\n" for p in wire), encoding="utf-8")
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)

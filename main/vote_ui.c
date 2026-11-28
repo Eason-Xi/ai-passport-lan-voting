@@ -97,27 +97,27 @@ static void render_switch(lv_obj_t *root, const vote_switch_t *sw)
         return;
     }
     if (sw->mode == VOTE_SWITCH_CODE) {
-        line(root, 50, "输入 6 位入场码", INK);
-        for (int i = 0; i < 6; i++) {
+        line(root, 50, "输入 4 位入场码", INK);
+        for (int i = 0; i < 4; i++) {
             bool active = i == sw->cursor;
-            int x = 14 + i * 36;
+            int x = 17 + i * 54;
             if (active) {
-                lv_obj_t *up = label(root, x, 80, 32, "^", GREEN);
+                lv_obj_t *up = label(root, x, 78, 44, "^", GREEN);
                 lv_obj_set_style_text_align(up, LV_TEXT_ALIGN_CENTER, 0);
-                lv_obj_t *dn = label(root, x, 152, 32, "v", GREEN);
+                lv_obj_t *dn = label(root, x, 156, 44, "v", GREEN);
                 lv_obj_set_style_text_align(dn, LV_TEXT_ALIGN_CENTER, 0);
             }
-            lv_obj_t *cell = panel(root, x, 102, 32, 46, active ? GREEN : SOFT);
+            lv_obj_t *cell = panel(root, x, 100, 44, 52, active ? GREEN : SOFT);
             char digit[2] = {sw->code[i] ? sw->code[i] : '0', 0};
-            lv_obj_t *num = label(cell, 0, 12, 32, digit, active ? 0xFFFFFF : INK);
+            lv_obj_t *num = label(cell, 0, 15, 44, digit, active ? 0xFFFFFF : INK);
             lv_obj_set_style_text_align(num, LV_TEXT_ALIGN_CENTER, 0);
         }
         if (sw->hint[0]) {
-            label(root, 18, 184, 204, sw->hint, 0x9B632B);
+            label(root, 18, 186, 204, sw->hint, 0x9B632B);
             label(root, 18, 232, 204, "上下修改  确定提交", MUTED);
         } else {
-            label(root, 18, 186, 204, sw->cursor < 5 ? "上下调数字  确定下一位" : "上下调数字  确定加入", GREEN);
-            label(root, 18, 222, 204, "双击确定：退回上一位", MUTED);
+            label(root, 18, 188, 204, sw->cursor < 3 ? "上下调数字  确定下一位" : "上下调数字  确定加入", GREEN);
+            label(root, 18, 224, 204, "双击确定：退回上一位", MUTED);
         }
         footer(root, "长按确定：返回");
         return;
@@ -128,7 +128,7 @@ static void render_switch(lv_obj_t *root, const vote_switch_t *sw)
         label(box, 12, 16, 192, sw->hint[0] ? sw->hint : "正在搜索主持台", sw->failed ? 0x9B632B : GREEN);
         if (sw->failed) {
             label(root, 18, 198, 204,
-                  sw->open_join ? "确定：重新搜索\n下键：改输 6 位入场码" : "确定：重新搜索\n上键：返回菜单",
+                  sw->open_join ? "确定：重新搜索\n下键：改输 4 位入场码" : "确定：重新搜索\n上键：返回菜单",
                   MUTED);
         } else if (sw->open_join) {
             label(root, 18, 200, 204, "请先在电脑主持台\n点击「一键入场」", MUTED);
@@ -164,7 +164,7 @@ static void render_switch(lv_obj_t *root, const vote_switch_t *sw)
     label(box, 12, 46, 192, sw->hint[0] ? sw->hint : "正在连接", sw->failed ? 0x9B632B : GREEN);
     if (sw->failed) {
         label(root, 18, 202, 204,
-              sw->open_join ? "确定：重新搜索\n下键：改输 6 位入场码" : "确定：修改入场码\n上下：返回菜单",
+              sw->open_join ? "确定：重新搜索\n下键：改输 4 位入场码" : "确定：修改入场码\n上下：返回菜单",
               MUTED);
     }
     footer(root, "长按确定：返回");
@@ -242,8 +242,11 @@ void vote_ui_render(const vote_view_t *view)
     line(root, 50, model->connected ? phase : "连接中断，正在重连", model->connected ? GREEN : 0x9B632B);
     line(root, 82, poll->title, INK);
     if (poll->phase == VOTE_PUBLISHED) {
-        for (int i = 0; i < poll->option_count; i++) {
-            int y = 118 + i * 26;
+        int visible = poll->option_count < 6 ? poll->option_count : 6;
+        int first = model->selected < 6 ? 0 : model->selected - 5;
+        for (int row = 0; row < visible; row++) {
+            int i = first + row;
+            int y = 118 + row * 26;
             snprintf(text, sizeof(text), "%c %s", 'A' + i, poll->options[i]);
             lv_obj_t *option = label(root, 18, y, 109, text, i == model->selected ? GREEN : INK);
             lv_label_set_long_mode(option, i == model->selected ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
@@ -253,7 +256,12 @@ void vote_ui_render(const vote_view_t *view)
             lv_obj_set_style_text_align(count, LV_TEXT_ALIGN_RIGHT, 0);
             if (poll->counts[i] > 0) panel(root, 18, y + 22, 200 * poll->counts[i] / poll->total + 1, 2, SOFT);
         }
-        snprintf(text, sizeof(text), batch ? "共 %d 票 / 确定换题" : "共 %d 票 / 上下查看", poll->total);
+        if (poll->option_count > 6) {
+            snprintf(text, sizeof(text), batch ? "共%d票 %d/%d 确定换题" : "共%d票 %d/%d 上下翻页",
+                     poll->total, model->selected + 1, poll->option_count);
+        } else {
+            snprintf(text, sizeof(text), batch ? "共 %d 票 / 确定换题" : "共 %d 票 / 上下查看", poll->total);
+        }
         footer(root, text);
         return;
     }

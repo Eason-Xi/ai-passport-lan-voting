@@ -36,8 +36,8 @@
     <select id="wifi" required><option value="">正在查找附近网络…</option><option value="manual">手动输入网络名</option></select>
     <div id="manual-name" hidden><label for="ssid">Wi-Fi 名称</label><input id="ssid" maxlength="32" autocomplete="off"></div>
     <div id="password-row"><label for="password">Wi-Fi 密码</label><input id="password" type="password" maxlength="63" autocomplete="off"></div>
-    <label for="code">主持台六位入场码</label>
-    <input id="code" required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="off" placeholder="见电脑主持台">
+    <label for="code">主持台四位入场码</label>
+    <input id="code" required inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" placeholder="见电脑主持台">
     <details><summary>手动指定主持电脑</summary>
       <label for="server">电脑地址</label>
       <input id="server" maxlength="95" autocomplete="off" autocapitalize="none" placeholder="例如 192.168.1.20，留空自动寻找">

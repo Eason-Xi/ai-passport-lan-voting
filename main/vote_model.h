@@ -3,11 +3,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VOTE_MAX_OPTIONS 6
+#define VOTE_MAX_OPTIONS 10
 #define VOTE_MAX_BATCH 50
 #define VOTE_TITLE_BYTES 241
 #define VOTE_OPTION_BYTES 97
-#define VOTE_MESSAGE_BYTES 2048
+#define VOTE_MESSAGE_BYTES 2560
 #define VOTE_SWITCH_HOST_LIMIT 8
 
 typedef enum { VOTE_IDLE, VOTE_OPEN, VOTE_CLOSED, VOTE_PUBLISHED } vote_phase_t;

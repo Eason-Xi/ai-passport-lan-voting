@@ -114,6 +114,15 @@
                 <i class="open-join-dot" aria-hidden="true"></i>
                 <span id="open-join-text">一键入场</span>
               </button>
+              <button
+                type="button"
+                class="copy-chip"
+                id="rotate-code-btn"
+                title="自定义或随机更换 4 位入场码"
+                hidden
+              >
+                <span>改码</span>
+              </button>
               <button type="button" class="copy-chip" id="copy-code">
                 <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <rect
@@ -135,9 +144,25 @@
               </button>
             </div>
           </div>
-          <strong id="join-code">------</strong>
+          <strong id="join-code">----</strong>
+          <form id="join-code-form" class="join-code-form" hidden>
+            <input
+              id="join-code-input"
+              type="text"
+              inputmode="numeric"
+              pattern="[0-9]{4}"
+              maxlength="4"
+              autocomplete="off"
+              placeholder="4 位数字"
+              aria-label="自定义 4 位入场码"
+              required
+            />
+            <button type="submit" class="code-action-btn primary" id="join-code-save">保存</button>
+            <button type="button" class="code-action-btn" id="join-code-random" title="随机生成新 4 位入场码">随机</button>
+            <button type="button" class="code-action-btn ghost" id="join-code-cancel">取消</button>
+          </form>
           <p class="session-sub" id="session-sub">
-            投票器可本机输码或开启一键入场 · 同局域网自动发现
+            投票器可本机输 4 位码或点一键入场 · 同局域网自动发现
           </p>
         </div>
 
@@ -174,14 +199,15 @@
       </section>
 
       <div class="workspace">
-        <section class="panel editor">
+        <section class="panel editor" id="panel-editor">
           <div class="panel-heading">
             <div>
               <h2 id="editor-title">新建投票</h2>
-              <p class="panel-sub" id="editor-sub">支持单题或一次最多 50 题批量发起，可混用 4 种投票模式</p>
+              <p class="panel-sub" id="editor-sub">支持单题或一次最多 50 题批量发起，可混用 4 种内置与自定义模式</p>
             </div>
             <div class="editor-heading-actions">
               <span class="pill">首票锁定</span>
+              <button type="button" id="custom-modes-open" class="secondary" hidden>自定义模式</button>
               <button type="button" id="library-open" class="secondary" hidden>题库</button>
             </div>
           </div>
@@ -199,9 +225,13 @@
             <p class="help" id="deadline-upgrade" hidden>
               当前主持服务仅支持手动截止。用原数据库重启新版服务即可定时收票。
             </p>
+            <div class="roster-preview-bar" id="roster-preview-bar" hidden>
+              <span id="roster-preview-text">参与范围：全员参与</span>
+              <button type="button" class="text-button" id="roster-jump-btn">去选设备</button>
+            </div>
             <button class="primary" id="start" type="submit">发起投票</button>
             <p class="form-note" id="form-note">
-              发起后将推送到在线投票器，收票期间可继续追加题目。
+              发题前可在下方「参与设备」调整参与范围，发起后本轮名单即锁定。
             </p>
           </form>
 
@@ -342,7 +372,7 @@
       </div>
 
       <div class="dashboard-lower">
-        <section class="panel devices">
+        <section class="panel devices" id="panel-devices">
           <div class="panel-heading">
             <div>
               <h2>参与设备</h2>
@@ -358,7 +388,7 @@
                   <i class="discovery-dot" aria-hidden="true"></i>
                   <span id="discovery-status">正在检查自动发现…</span>
                 </span>
-                <p>手机扫投票器屏幕二维码，选择 2.4 GHz Wi-Fi 并输入入场码。</p>
+                <p>手机扫投票器屏幕二维码，选择 2.4 GHz Wi-Fi 并输入 4 位入场码。</p>
               </div>
               <details class="manual-net">
                 <summary>手动连接或使用旧版投票器</summary>
@@ -379,6 +409,43 @@
               </div>
               <p id="device-limit-help" class="help"></p>
             </form>
+          </div>
+
+          <div class="roster-panel" id="roster-panel" hidden>
+            <div class="roster-head">
+              <div>
+                <strong>参与范围</strong>
+                <small id="roster-mode-hint">发题前配置，发起投票后本轮自动锁定不可更改</small>
+              </div>
+              <span class="pill" id="roster-summary-pill">全员参与</span>
+            </div>
+
+            <div class="roster-locked-note" id="roster-locked-note" hidden></div>
+
+            <div class="roster-segmented" role="group" aria-label="投票参与模式">
+              <button type="button" class="roster-seg-btn" data-roster-mode="all" aria-pressed="true">全员参与</button>
+              <button type="button" class="roster-seg-btn" data-roster-mode="selected" aria-pressed="false">选中参与</button>
+              <button type="button" class="roster-seg-btn" data-roster-mode="exclude" aria-pressed="false">排除指定</button>
+            </div>
+
+            <div class="roster-actions-row" id="roster-actions-row" hidden>
+              <div class="roster-quick-btns">
+                <button type="button" class="mini-tool" id="roster-quick-primary">全选</button>
+                <button type="button" class="mini-tool" id="roster-quick-online">仅选在线</button>
+                <button type="button" class="mini-tool" id="roster-quick-clear">清空</button>
+              </div>
+              <label class="roster-check" id="roster-allow-late-wrap" hidden>
+                <input type="checkbox" id="roster-allow-late" checked />
+                <span>允许中途新机加入</span>
+              </label>
+            </div>
+
+            <div class="roster-footer-row">
+              <label class="roster-check">
+                <input type="checkbox" id="roster-excluded-results" checked />
+                <span>公布结果时，未参与设备也可查看最终结果</span>
+              </label>
+            </div>
           </div>
 
           <div id="device-list"></div>
@@ -425,10 +492,10 @@
         <div class="stage-meta">
           <div class="stage-stat">
             <span>入场码</span>
-            <strong id="stage-code">------</strong>
+            <strong id="stage-code">----</strong>
           </div>
           <div class="stage-stat">
-            <span>在线设备</span>
+            <span id="stage-online-label">在线设备</span>
             <strong><em id="stage-online">0</em><span id="stage-device-limit"> / 10</span></strong>
           </div>
           <div class="stage-stat">
@@ -447,13 +514,14 @@
         <div id="stage-empty" class="stage-empty">
           <div class="stage-waiting-ring" aria-hidden="true"></div>
           <h2>等待主持人发起投票</h2>
-          <p>请使用手机扫描投票器屏幕二维码接入现场 Wi-Fi，并输入上方 6 位入场码。</p>
+          <p>请使用手机扫描投票器屏幕二维码接入现场 Wi-Fi，并输入上方 4 位入场码或使用一键入场。</p>
         </div>
 
         <div id="stage-content" class="stage-content" hidden>
           <div class="stage-header-block">
             <div class="stage-badges">
               <span class="stage-batch-tag" id="stage-batch-tag" hidden></span>
+              <span class="stage-batch-tag stage-roster-tag" id="stage-roster-tag" hidden></span>
               <div class="stage-countdown" id="stage-countdown" hidden>
                 <span id="stage-time-left"></span>
                 <small id="stage-deadline-at"></small>
@@ -491,6 +559,127 @@
         <div class="library-actions">
           <button id="library-back" type="button" class="secondary">取消编辑</button>
           <button id="library-save" type="submit" class="primary">保存题目</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="custom-modes-dialog" class="panel custom-modes-dialog" aria-labelledby="cm-dialog-title">
+      <div class="panel-heading">
+        <div>
+          <h2 id="cm-dialog-title">自定义投票模式</h2>
+          <p class="panel-sub" id="cm-dialog-sub">预设常用选项与表决 / 评分 / 测验规则，出题时一键复用</p>
+        </div>
+        <button id="cm-close" type="button" class="text-button">关闭</button>
+      </div>
+      <p id="cm-status" class="help" role="status" hidden></p>
+
+      <div id="cm-browser">
+        <div class="cm-browser-top">
+          <button id="cm-new" type="button" class="primary">＋ 新建模式</button>
+          <div class="cm-presets">
+            <span class="cm-presets-label">快速范本：</span>
+            <button type="button" class="mini-tool cm-preset-btn" data-preset="two_thirds">2/3 多数表决</button>
+            <button type="button" class="mini-tool cm-preset-btn" data-preset="satisfaction4">四档满意度</button>
+            <button type="button" class="mini-tool cm-preset-btn" data-preset="score10">十分制打分</button>
+            <button type="button" class="mini-tool cm-preset-btn" data-preset="true_false">是非判断</button>
+          </div>
+        </div>
+        <div id="cm-list"></div>
+      </div>
+
+      <form id="cm-form" hidden>
+        <div class="cm-field-grid">
+          <label class="cm-field">
+            <span>模式名称 <small>1～20 字</small></span>
+            <input id="cm-name" type="text" maxlength="20" required placeholder="例如：2/3 多数表决、四档满意度" />
+          </label>
+          <label class="cm-field">
+            <span>统计与判定规则</span>
+            <select id="cm-base-kind">
+              <option value="single">普通计票（统计各选项票数与占比）</option>
+              <option value="approval">通过线表决（自定义赞成项、弃权项与通过线）</option>
+              <option value="rating">加权评分（自定义各选项分值，汇总均分与总分）</option>
+              <option value="quiz">标准答案测验（出题时指定正确答案）</option>
+            </select>
+          </label>
+        </div>
+
+        <label class="cm-field">
+          <span>模式说明 <small>可选，出题时显示提示</small></span>
+          <input id="cm-guide" type="text" maxlength="80" placeholder="例如：有效票赞成率达到 66.7% 即通过" />
+        </label>
+
+        <div id="cm-use-fixed-wrap" class="cm-toggle-row">
+          <label class="roster-check">
+            <input type="checkbox" id="cm-use-fixed" checked />
+            <span>预设固定选项（勾选后每次出题自动带入这些选项；取消则出题时自由填写）</span>
+          </label>
+        </div>
+
+        <div id="cm-fixed-section" class="cm-box">
+          <div class="cm-box-head">
+            <div>
+              <strong>预设选项</strong>
+              <small id="cm-options-hint">2～10 项，每项最多 24 字（须在投票器字库内）</small>
+            </div>
+            <div class="cm-box-head-right">
+              <label id="cm-unit-wrap" class="cm-unit-inline" hidden>
+                <span>单位</span>
+                <input id="cm-unit" type="text" maxlength="6" value="分" placeholder="分" />
+              </label>
+              <button type="button" class="text-button" id="cm-add-option">＋ 添加选项</button>
+            </div>
+          </div>
+          <div id="cm-options"></div>
+          <div id="cm-font-warn" class="card-font-warn" hidden>
+            <strong>投票器字库暂不支持：</strong>
+            <span class="font-warn-chars"></span>
+          </div>
+        </div>
+
+        <div id="cm-approval-rules" class="cm-box" hidden>
+          <div class="cm-box-head">
+            <div>
+              <strong>通过线规则</strong>
+              <small>按「赞成票 ÷ 有效表决票」计算是否通过</small>
+            </div>
+          </div>
+          <div class="cm-approval-grid">
+            <label class="cm-field">
+              <span>赞成 / 通过项</span>
+              <select id="cm-yes-index"></select>
+            </label>
+            <label class="cm-field">
+              <span>弃权项（不计入分母）</span>
+              <select id="cm-abstain-index"></select>
+            </label>
+          </div>
+          <div class="cm-threshold-row">
+            <label class="cm-field">
+              <span>通过条件</span>
+              <div class="cm-threshold-inputs">
+                <select id="cm-pass-op">
+                  <option value="gt">超过（&gt;）</option>
+                  <option value="gte">达到（≥）</option>
+                </select>
+                <div class="cm-pct-wrap">
+                  <input id="cm-pass-pct" type="number" min="0.1" max="100" step="0.1" value="50" />
+                  <span>%</span>
+                </div>
+              </div>
+            </label>
+            <div class="cm-pct-chips">
+              <button type="button" class="mini-tool cm-pct-chip" data-op="gt" data-pct="50">&gt; 50%</button>
+              <button type="button" class="mini-tool cm-pct-chip" data-op="gte" data-pct="66.7">≥ 66.7%</button>
+              <button type="button" class="mini-tool cm-pct-chip" data-op="gte" data-pct="75">≥ 75%</button>
+              <button type="button" class="mini-tool cm-pct-chip" data-op="gte" data-pct="100">全票通过</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="library-actions cm-form-actions">
+          <button id="cm-back" type="button" class="secondary">取消编辑</button>
+          <button id="cm-save" type="submit" class="primary">保存模式</button>
         </div>
       </form>
     </dialog>
@@ -535,7 +724,7 @@
         ></textarea>
         <div class="custom-options">
           <div class="option-heading">
-            <label>投票选项 <small>2～6 项，每项最多 24 字</small></label>
+            <label>投票选项 <small>2～10 项，每项最多 24 字</small></label>
             <button type="button" class="text-button add-option">＋ 添加选项</button>
           </div>
           <div class="options"></div>
